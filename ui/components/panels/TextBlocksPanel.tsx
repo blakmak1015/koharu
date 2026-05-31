@@ -29,6 +29,7 @@ import type { TextDataPatch } from '@/lib/api/schemas'
 import { applyOp, invalidateScene, queueAutoRender, reorderPageTextNodes } from '@/lib/io/scene'
 import { ops } from '@/lib/ops'
 import { useEditorUiStore } from '@/lib/stores/editorUiStore'
+import { buildSystemPrompt } from '@/lib/stores/glossaryStore'
 import { useJobsStore } from '@/lib/stores/jobsStore'
 import { usePreferencesStore } from '@/lib/stores/preferencesStore'
 import { useSelectionStore } from '@/lib/stores/selectionStore'
@@ -98,7 +99,7 @@ export function TextBlocksPanel() {
       pages: [page.id],
       textNodeIds: [nodeId],
       targetLanguage: editor.selectedLanguage,
-      systemPrompt: prefs.customSystemPrompt,
+      systemPrompt: buildSystemPrompt(prefs.customSystemPrompt),
       defaultFont: prefs.defaultFont,
       readingOrder: editor.readingOrder === 'custom' ? undefined : editor.readingOrder,
     })

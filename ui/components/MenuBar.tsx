@@ -23,6 +23,7 @@ import { exportCurrentProjectAs, importPages } from '@/lib/io/pagesIo'
 import { closeProject, redoOp, selectAllTextNodesOnCurrentPage, undoOp } from '@/lib/io/scene'
 import { formatShortcutForDisplay, getPlatform } from '@/lib/shortcutUtils'
 import { useEditorUiStore } from '@/lib/stores/editorUiStore'
+import { buildSystemPrompt } from '@/lib/stores/glossaryStore'
 import { usePreferencesStore } from '@/lib/stores/preferencesStore'
 import { useSelectionStore } from '@/lib/stores/selectionStore'
 
@@ -93,7 +94,7 @@ export function MenuBar() {
       steps,
       pages: opts.pageId ? [opts.pageId] : undefined,
       targetLanguage: editor.selectedLanguage,
-      systemPrompt: prefs.customSystemPrompt,
+      systemPrompt: buildSystemPrompt(prefs.customSystemPrompt),
       defaultFont: prefs.defaultFont,
       readingOrder: editor.readingOrder === 'custom' ? undefined : editor.readingOrder,
     })

@@ -25,6 +25,7 @@ fn bootstrap_api() -> OpenApiRouter<ApiState> {
     OpenApiRouter::default()
         .merge(routes::downloads::router())
         .merge(routes::operations::router())
+        .merge(routes::ext::router())
         .merge(events::router())
 }
 

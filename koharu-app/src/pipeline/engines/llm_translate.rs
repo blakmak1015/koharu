@@ -2,13 +2,24 @@
 //! sends them through the loaded LLM as tagged blocks, writes the parsed
 //! translations back via `UpdateNode { TextDataPatch { translation } }`.
 
+use std::collections::HashSet;
+
 use anyhow::Result;
 use async_trait::async_trait;
-use koharu_core::{NodeDataPatch, NodeId, NodePatch, Op, PageId, Scene, TextData, TextDataPatch};
+use koharu_core::{
+    NodeDataPatch, NodeId, NodeKind, NodePatch, Op, PageId, Scene, TextData, TextDataPatch,
+};
 
 use crate::pipeline::artifacts::Artifact;
 use crate::pipeline::engine::{Engine, EngineCtx, EngineInfo};
 use crate::pipeline::engines::support::text_nodes;
+
+/// Max number of prior `(source → translation)` pairs fed back to the model as
+/// "translation memory". Keeps the added prompt bounded so the context stays
+/// small enough to be fast and fit in VRAM.
+const MAX_MEMORY_PAIRS: usize = 40;
+/// Skip pathologically long lines so one giant block can't dominate the budget.
+const MAX_MEMORY_FIELD_CHARS: usize = 200;
 
 pub struct Model;
 
@@ -21,12 +32,27 @@ impl Engine for Model {
         }
 
         let sources: Vec<String> = targets.iter().map(|(_, s)| s.clone()).collect();
+
+        // Cross-page translation memory: the model is stateless and only sees
+        // one translate call at a time, so names / terms / character voice
+        // drift across a chapter. Feed back the lines already translated
+        // elsewhere in the scene as reference so it stays consistent. This is
+        // appended to whatever system prompt the UI sent (custom prompt +
+        // glossary); `koharu-llm` in turn appends all of it to the base
+        // manga/target-language prompt.
+        let exclude: HashSet<NodeId> = targets.iter().map(|(id, _)| *id).collect();
+        let memory = collect_translation_memory(ctx.scene, &exclude);
+        let system_prompt = combine_system_prompt(
+            ctx.options.system_prompt.as_deref(),
+            format_memory_block(&memory).as_deref(),
+        );
+
         let translations = ctx
             .llm
             .translate_texts(
                 &sources,
                 ctx.options.target_language.as_deref(),
-                ctx.options.system_prompt.as_deref(),
+                system_prompt.as_deref(),
             )
             .await?;
 
@@ -78,6 +104,86 @@ fn should_translate(id: NodeId, text_data: &TextData, allowed_ids: Option<&[Node
         .is_some_and(|source| !source.trim().is_empty())
 }
 
+/// Collect distinct `(source, translation)` pairs from text nodes anywhere in
+/// the scene that have already been translated, excluding the nodes we are
+/// about to (re)translate. Pages and nodes iterate in reading order
+/// (`IndexMap`), later occurrences win (most recently established wording), and
+/// the result is capped to the most recent [`MAX_MEMORY_PAIRS`] while keeping
+/// reading order for presentation.
+fn collect_translation_memory(scene: &Scene, exclude: &HashSet<NodeId>) -> Vec<(String, String)> {
+    let mut all: Vec<(String, String)> = Vec::new();
+    for (_, page) in &scene.pages {
+        for (id, node) in &page.nodes {
+            if exclude.contains(id) {
+                continue;
+            }
+            let NodeKind::Text(text_data) = &node.kind else {
+                continue;
+            };
+            let (Some(source), Some(translation)) =
+                (text_data.text.as_ref(), text_data.translation.as_ref())
+            else {
+                continue;
+            };
+            let source = source.trim();
+            let translation = translation.trim();
+            if source.is_empty() || translation.is_empty() {
+                continue;
+            }
+            if source.chars().count() > MAX_MEMORY_FIELD_CHARS
+                || translation.chars().count() > MAX_MEMORY_FIELD_CHARS
+            {
+                continue;
+            }
+            all.push((source.to_string(), translation.to_string()));
+        }
+    }
+
+    // Dedup by source, keeping the last occurrence (most recent wording), then
+    // keep only the most recent `MAX_MEMORY_PAIRS`, both preserving order.
+    let mut seen = HashSet::new();
+    let mut deduped: Vec<(String, String)> = Vec::new();
+    for (source, translation) in all.into_iter().rev() {
+        if seen.insert(source.clone()) {
+            deduped.push((source, translation));
+        }
+    }
+    deduped.reverse();
+    let start = deduped.len().saturating_sub(MAX_MEMORY_PAIRS);
+    deduped.split_off(start)
+}
+
+/// Render collected memory into an instruction block, or `None` when empty.
+fn format_memory_block(pairs: &[(String, String)]) -> Option<String> {
+    if pairs.is_empty() {
+        return None;
+    }
+    let mut block = String::from(
+        "Earlier in this same chapter you already produced the translations below. \
+         Keep names, places, special terms, and recurring phrases worded exactly the same, \
+         and keep each character's established voice and speech style consistent with these. \
+         They are reference only — do not output them again:",
+    );
+    for (source, translation) in pairs {
+        block.push('\n');
+        block.push_str(source);
+        block.push_str(" => ");
+        block.push_str(translation);
+    }
+    Some(block)
+}
+
+/// Join the UI-supplied system prompt (custom prompt + glossary) with the
+/// translation-memory block. Either part may be absent.
+fn combine_system_prompt(base: Option<&str>, memory: Option<&str>) -> Option<String> {
+    match (base, memory) {
+        (Some(base), Some(memory)) => Some(format!("{base}\n\n{memory}")),
+        (Some(base), None) => Some(base.to_string()),
+        (None, Some(memory)) => Some(memory.to_string()),
+        (None, None) => None,
+    }
+}
+
 inventory::submit! {
     EngineInfo {
         id: "llm",
@@ -112,6 +218,19 @@ mod tests {
             visible: true,
             kind: NodeKind::Text(TextData {
                 text: text.map(str::to_string),
+                ..Default::default()
+            }),
+        }
+    }
+
+    fn translated_node(id: NodeId, text: &str, translation: &str) -> Node {
+        Node {
+            id,
+            transform: Transform::default(),
+            visible: true,
+            kind: NodeKind::Text(TextData {
+                text: Some(text.to_string()),
+                translation: Some(translation.to_string()),
                 ..Default::default()
             }),
         }
@@ -162,5 +281,68 @@ mod tests {
             collect_translation_targets_from(&scene, page_id(), options.text_node_ids.as_deref());
 
         assert!(targets.is_empty());
+    }
+
+    #[test]
+    fn memory_collects_translated_nodes_excluding_targets() {
+        let target = node_id(1);
+        let scene = scene_with_texts(vec![
+            translated_node(node_id(2), "ダイゴ", "ไดโกะ"),
+            translated_node(node_id(3), "巨塔の魔女", "แม่มดหอคอยยักษ์"),
+            // Not yet translated -> not memory.
+            text_node(node_id(4), Some("まだ")),
+            // The block we are about to translate -> excluded even if it has a
+            // stale translation.
+            translated_node(target, "お前は誰だ", "แกเป็นใคร"),
+        ]);
+
+        let exclude = HashSet::from([target]);
+        let memory = collect_translation_memory(&scene, &exclude);
+
+        assert_eq!(
+            memory,
+            vec![
+                ("ダイゴ".to_string(), "ไดโกะ".to_string()),
+                ("巨塔の魔女".to_string(), "แม่มดหอคอยยักษ์".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn memory_dedupes_by_source_keeping_most_recent() {
+        let scene = scene_with_texts(vec![
+            translated_node(node_id(1), "ダイゴ", "ไดโกะ"),
+            translated_node(node_id(2), "ダイゴ", "ไดโก้"),
+        ]);
+
+        let memory = collect_translation_memory(&scene, &HashSet::new());
+
+        assert_eq!(memory, vec![("ダイゴ".to_string(), "ไดโก้".to_string())]);
+    }
+
+    #[test]
+    fn memory_block_is_none_when_empty_and_present_otherwise() {
+        assert!(format_memory_block(&[]).is_none());
+
+        let block = format_memory_block(&[("ダイゴ".to_string(), "ไดโกะ".to_string())]).unwrap();
+        assert!(block.contains("ダイゴ => ไดโกะ"));
+        assert!(block.contains("consistent"));
+    }
+
+    #[test]
+    fn combine_prompt_merges_base_and_memory() {
+        assert_eq!(combine_system_prompt(None, None), None);
+        assert_eq!(
+            combine_system_prompt(Some("glossary"), None).as_deref(),
+            Some("glossary")
+        );
+        assert_eq!(
+            combine_system_prompt(None, Some("mem")).as_deref(),
+            Some("mem")
+        );
+        assert_eq!(
+            combine_system_prompt(Some("glossary"), Some("mem")).as_deref(),
+            Some("glossary\n\nmem")
+        );
     }
 }

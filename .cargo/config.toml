@@ -3,7 +3,11 @@
 CARGO_WORKSPACE_DIR = { value = "", relative = true }
 # llama.cpp release tag
 LLAMA_CPP_TAG = "b8935"
-# CUDA 13.0 requires C++17
-NVCC_PREPEND_FLAGS = "-std=c++17"
+# CUDA 13.0+ requires C++17; /Zc:preprocessor is required by CUDA 13.x CCCL headers
+# under MSVC (otherwise candle-kernels nvcc build fails with error C1189).
+NVCC_PREPEND_FLAGS = "-std=c++17 -Xcompiler /Zc:preprocessor"
 # override nvidia-smi compute capability
 CUDA_COMPUTE_CAP = "80"
+# cudarc 0.19.6 only knows CUDA up to 13.2; this machine has the 13.3 toolkit.
+# Pin to 13.2 (ABI-compatible within the 13.x line; koharu uses dynamic loading).
+CUDARC_CUDA_VERSION = "13020"

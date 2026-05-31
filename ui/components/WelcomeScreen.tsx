@@ -5,6 +5,7 @@ import {
   ArrowRightIcon,
   ClockIcon,
   FileArchiveIcon,
+  GlobeIcon,
   PlusIcon,
   XIcon,
 } from 'lucide-react'
@@ -24,6 +25,7 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { WebsiteDialog } from '@/components/WebsiteDialog'
 import { useListProjects } from '@/lib/api/default/default'
 import type { ProjectSummary } from '@/lib/api/schemas'
 import { importKhrFile } from '@/lib/io/pagesIo'
@@ -48,6 +50,7 @@ export function WelcomeScreen() {
   const [busy, setBusy] = useState<Busy>(false)
   const [error, setError] = useState<string | null>(null)
   const [newDialogOpen, setNewDialogOpen] = useState(false)
+  const [websiteOpen, setWebsiteOpen] = useState(false)
 
   const openById = useCallback(async (id: string) => {
     setError(null)
@@ -135,6 +138,12 @@ export function WelcomeScreen() {
             icon={<FileArchiveIcon className='h-4 w-4' />}
             label={t('welcome.importKhr')}
           />
+          <SecondaryAction
+            onClick={() => setWebsiteOpen(true)}
+            disabled={!!busy}
+            icon={<GlobeIcon className='h-4 w-4' />}
+            label='Translate from website'
+          />
         </div>
 
         <section className='flex flex-col gap-2'>
@@ -168,6 +177,8 @@ export function WelcomeScreen() {
         onSubmit={onCreate}
         busy={busy === 'new'}
       />
+
+      <WebsiteDialog open={websiteOpen} onOpenChange={setWebsiteOpen} />
     </div>
   )
 }

@@ -51,8 +51,8 @@ pub const BLOCK_TAG_INSTRUCTIONS: &str = "The input uses numbered tags like [1],
 
 pub fn system_prompt(target_language: Language) -> String {
     format!(
-        "You are a professional manga translator. Translate manga dialogue into natural {} that fits inside speech bubbles. Preserve character voice, emotional tone, relationship nuance, emphasis, and sound effects naturally. Keep the wording concise. Do not add notes, explanations, or romanization. {BLOCK_TAG_INSTRUCTIONS}",
-        target_language
+        "You are a professional manga translator working from Japanese. Translate each Japanese manga line into {lang} that reads like natural spoken {lang} — the way a real person would actually say it in that moment, not a word-for-word gloss. Convey the full meaning and intent of the line; if a literal rendering would sound stiff or unclear, rephrase it so a native {lang} reader instantly gets it. Match the character's voice, emotion, politeness level, and relationship to whoever they are speaking to, and use the natural sentence-final particles and register of casual spoken {lang} so the dialogue feels alive. Render sound effects and shouts expressively. Keep each line short enough to fit a speech bubble, but never drop meaning just to make it shorter. Write every translation entirely in {lang} and use only the {lang} writing system. Never leave or insert Chinese, Japanese, or Korean characters in the output — render names, sound effects, and special-move names in {lang} instead. Do not add notes, explanations, or romanization. {BLOCK_TAG_INSTRUCTIONS}",
+        lang = target_language
     )
 }
 
@@ -74,11 +74,16 @@ impl PromptRenderer {
         custom_prompt: Option<&str>,
     ) -> Vec<ChatMessage> {
         let text = text.into();
+        // The base prompt carries the manga + target-language purity rules and
+        // the block-tag instructions. A custom prompt (e.g. a per-series
+        // glossary) is *appended* to it rather than replacing it, so the
+        // "translate entirely into the target language" guardrails are never
+        // dropped. Upstream replaced the base prompt, which silently lost those
+        // rules and let the model leak the source language back into the output.
+        let base = system_prompt(target_language);
         let sys = match custom_prompt {
-            Some(p) if !p.trim().is_empty() => {
-                format!("{p} {BLOCK_TAG_INSTRUCTIONS}")
-            }
-            _ => system_prompt(target_language),
+            Some(p) if !p.trim().is_empty() => format!("{base}\n\n{}", p.trim()),
+            _ => base,
         };
 
         match self.model_id {
@@ -132,9 +137,28 @@ mod tests {
     #[test]
     fn system_prompt_mentions_target_language_and_block_rules() {
         let prompt = system_prompt(Language::Korean);
-        assert!(prompt.contains("natural Korean"));
+        assert!(prompt.contains("spoken Korean"));
         assert!(prompt.contains("[1], [2]"));
         assert!(prompt.contains("Do not merge"));
+    }
+
+    #[test]
+    fn custom_prompt_is_appended_not_replacing_base() {
+        let renderer = PromptRenderer::new(
+            ModelId::SakuraGalTransl7Bv3_7,
+            "x".to_string(),
+            "<s>".to_string(),
+            "</s>".to_string(),
+        );
+        let messages = renderer.messages("hello", Language::Korean, Some("Glossary: A = B"));
+        let sys = &messages[0];
+        assert_eq!(sys.role, ChatRole::System);
+        // Base manga/target-language rules are retained...
+        assert!(sys.content.contains("spoken Korean"));
+        assert!(sys.content.contains("Do not merge"));
+        // ...and the custom prompt (e.g. a glossary) is appended after them.
+        assert!(sys.content.contains("Glossary: A = B"));
+        assert!(sys.content.trim_end().ends_with("Glossary: A = B"));
     }
 
     #[test]

@@ -12,6 +12,7 @@ import { motion } from 'motion/react'
 import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
+import { GlossaryDialog } from '@/components/GlossaryDialog'
 import { Button } from '@/components/ui/button'
 import { LlmModelSelect, type LlmModelOption } from '@/components/ui/llm-model-select'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
@@ -33,7 +34,8 @@ import {
   useGetCurrentLlm,
 } from '@/lib/api/default/default'
 import type { LlmCatalog, LlmCatalogModel, LlmProviderCatalog, LlmTarget } from '@/lib/api/schemas'
-import { useEditorUiStore } from '@/lib/stores/editorUiStore'
+import { DEFAULT_LOCAL_MODEL_ID, useEditorUiStore } from '@/lib/stores/editorUiStore'
+import { buildSystemPrompt } from '@/lib/stores/glossaryStore'
 import { useJobsStore } from '@/lib/stores/jobsStore'
 import { usePreferencesStore } from '@/lib/stores/preferencesStore'
 import { useSelectionStore } from '@/lib/stores/selectionStore'
@@ -127,7 +129,7 @@ function WorkflowButtons() {
       steps,
       pages: [pageId],
       targetLanguage: editor.selectedLanguage,
-      systemPrompt: prefs.customSystemPrompt,
+      systemPrompt: buildSystemPrompt(prefs.customSystemPrompt),
       defaultFont: prefs.defaultFont,
       readingOrder: editor.readingOrder === 'custom' ? undefined : editor.readingOrder,
     })
@@ -233,6 +235,17 @@ function WorkflowButtons() {
   )
 }
 
+// This fork ships a Thai-only translation workflow. When no language has been
+// chosen yet, prefer Thai over the model's first listed language (which is
+// often zh-CN/en-US and caused silent wrong-language output).
+const PREFERRED_LANGUAGE = 'th-TH'
+
+function pickLanguage(current: string | undefined, languages: string[]): string | undefined {
+  if (current && languages.includes(current)) return current
+  if (languages.includes(PREFERRED_LANGUAGE)) return PREFERRED_LANGUAGE
+  return languages[0]
+}
+
 function LlmStatusPopover() {
   const { t } = useTranslation()
   const { data: llmCatalog } = useGetCatalog()
@@ -258,11 +271,7 @@ function LlmStatusPopover() {
   const handleSetSelectedModel = (key: string) => {
     const next = llmModels.find(({ model }) => llmTargetKey(model.target) === key)
     if (!next) return
-    const nextLanguages = next.model.languages
-    const nextLanguage =
-      llmSelectedLanguage && nextLanguages.includes(llmSelectedLanguage)
-        ? llmSelectedLanguage
-        : nextLanguages[0]
+    const nextLanguage = pickLanguage(llmSelectedLanguage, next.model.languages)
     useEditorUiStore.setState({ selectedTarget: next.model.target, selectedLanguage: nextLanguage })
   }
 
@@ -291,13 +300,25 @@ function LlmStatusPopover() {
   useEffect(() => {
     if (llmModels.length === 0) return
     const hasCurrent = llmModels.some(({ model }) => sameLlmTarget(model.target, selectedTarget))
-    const nextModel = hasCurrent ? selectedModel?.model : llmModels[0]?.model
+    // When nothing is selected yet, default to the model that is actually
+    // loaded (e.g. qwen3.5-9b) rather than the first catalog entry (vntl,
+    // English-only) so the default language can resolve to Thai.
+    const loadedModel = llmModels.find(({ model }) =>
+      sameLlmTarget(model.target, llmState?.target),
+    )?.model
+    // While the LLM is still loading and nothing is selected yet, wait for the
+    // loaded model instead of falling back to the first catalog entry (vntl,
+    // English-only). That race previously clobbered the Thai default to en-US.
+    if (!hasCurrent && !loadedModel && (!llmState || llmState.status === 'loading')) return
+    const defaultModel = llmModels.find(
+      ({ model }) =>
+        model.target.kind === 'local' && model.target.modelId === DEFAULT_LOCAL_MODEL_ID,
+    )?.model
+    const nextModel = hasCurrent
+      ? selectedModel?.model
+      : (loadedModel ?? defaultModel ?? llmModels[0]?.model)
     if (!nextModel) return
-    const nextLanguages = nextModel.languages
-    const nextLanguage =
-      llmSelectedLanguage && nextLanguages.includes(llmSelectedLanguage)
-        ? llmSelectedLanguage
-        : nextLanguages[0]
+    const nextLanguage = pickLanguage(llmSelectedLanguage, nextModel.languages)
     const cur = useEditorUiStore.getState()
     if (
       sameLlmTarget(cur.selectedTarget, nextModel.target) &&
@@ -309,7 +330,14 @@ function LlmStatusPopover() {
       selectedTarget: nextModel.target,
       selectedLanguage: nextLanguage,
     })
-  }, [llmModels, llmSelectedLanguage, selectedModel?.model, selectedTarget])
+  }, [
+    llmModels,
+    llmSelectedLanguage,
+    selectedModel?.model,
+    selectedTarget,
+    llmState?.target,
+    llmState?.status,
+  ])
 
   const indicatorBusy = busy || llmLoading
 
@@ -415,6 +443,7 @@ function LlmStatusPopover() {
               rows={5}
               className='min-h-0 resize-y px-2 py-1.5 text-xs leading-snug md:text-xs'
             />
+            <GlossaryDialog />
           </div>
         </div>
       </PopoverContent>

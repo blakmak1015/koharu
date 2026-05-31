@@ -218,7 +218,23 @@ impl Model {
         let mut guard = self.state.write().await;
         let translation = match &mut *guard {
             State::ReadyLocal(llm) => {
-                let opts = llm.id().default_generate_options();
+                let mut opts = llm.id().default_generate_options();
+                // Manga translation must be faithful and stay in the target
+                // language. Some general chat models (notably the qwen
+                // *-uncensored variants) default to temperature 1.0, which makes
+                // them drift mid-sentence into the wrong script (e.g. leaking
+                // Chinese characters into Thai output). Cap the temperature for
+                // the translation use-case so output stays in one language.
+                //
+                // 0.3 kept output in-language but was too rigid: the model
+                // always picked the safest, most literal wording, which read
+                // flat and lost nuance/voice. 0.5 gives enough room for natural
+                // phrasing and tone while still being low enough to keep the
+                // output in a single script.
+                const MAX_TRANSLATION_TEMPERATURE: f64 = 0.5;
+                if opts.temperature > MAX_TRANSLATION_TEMPERATURE {
+                    opts.temperature = MAX_TRANSLATION_TEMPERATURE;
+                }
                 llm.generate(&body, &opts, target_language, custom_system_prompt)
             }
             State::ReadyProvider { target, provider } => {
