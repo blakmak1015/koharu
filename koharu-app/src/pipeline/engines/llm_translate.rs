@@ -7,12 +7,13 @@ use std::collections::HashSet;
 use anyhow::Result;
 use async_trait::async_trait;
 use koharu_core::{
-    NodeDataPatch, NodeId, NodeKind, NodePatch, Op, PageId, Scene, TextData, TextDataPatch,
+    NodeDataPatch, NodeId, NodeKind, NodePatch, Op, PageId, ReadingOrder, Scene, TextData,
+    TextDataPatch,
 };
 
 use crate::pipeline::artifacts::Artifact;
 use crate::pipeline::engine::{Engine, EngineCtx, EngineInfo};
-use crate::pipeline::engines::support::text_nodes;
+use crate::pipeline::engines::support::{sort_manga_reading_order, text_nodes};
 
 /// Max number of prior `(source → translation)` pairs fed back to the model as
 /// "translation memory". Keeps the added prompt bounded so the context stays
@@ -77,19 +78,43 @@ impl Engine for Model {
 }
 
 fn collect_translation_targets(ctx: &EngineCtx<'_>) -> Vec<(NodeId, String)> {
-    collect_translation_targets_from(ctx.scene, ctx.page, ctx.options.text_node_ids.as_deref())
+    collect_translation_targets_from(
+        ctx.scene,
+        ctx.page,
+        ctx.options.text_node_ids.as_deref(),
+        ctx.options.reading_order,
+    )
 }
 
 fn collect_translation_targets_from(
     scene: &Scene,
     page: PageId,
     allowed_ids: Option<&[NodeId]>,
+    reading_order: Option<ReadingOrder>,
 ) -> Vec<(NodeId, String)> {
-    text_nodes(scene, page)
+    let mut blocks: Vec<([f32; 4], (NodeId, String))> = text_nodes(scene, page)
         .into_iter()
         .filter(|(id, _, text_data)| should_translate(*id, text_data, allowed_ids))
-        .filter_map(|(id, _, text_data)| text_data.text.as_ref().map(|source| (id, source.clone())))
-        .collect()
+        .filter_map(|(id, transform, text_data)| {
+            let source = text_data.text.as_ref()?;
+            let bbox = [
+                transform.x,
+                transform.y,
+                transform.x + transform.width,
+                transform.y + transform.height,
+            ];
+            Some((bbox, (id, source.clone())))
+        })
+        .collect();
+
+    // Sort by manga reading order so the LLM sees dialogue in narrative
+    // sequence. Default to RTL (standard manga) when not specified.
+    sort_manga_reading_order(
+        &mut blocks,
+        reading_order.unwrap_or(ReadingOrder::Rtl),
+    );
+
+    blocks.into_iter().map(|(_, pair)| pair).collect()
 }
 
 fn should_translate(id: NodeId, text_data: &TextData, allowed_ids: Option<&[NodeId]>) -> bool {
@@ -260,7 +285,7 @@ mod tests {
         };
 
         let targets =
-            collect_translation_targets_from(&scene, page_id(), options.text_node_ids.as_deref());
+            collect_translation_targets_from(&scene, page_id(), options.text_node_ids.as_deref(), None);
 
         assert_eq!(targets, vec![(second, "second".to_string())]);
     }
@@ -278,7 +303,7 @@ mod tests {
         };
 
         let targets =
-            collect_translation_targets_from(&scene, page_id(), options.text_node_ids.as_deref());
+            collect_translation_targets_from(&scene, page_id(), options.text_node_ids.as_deref(), None);
 
         assert!(targets.is_empty());
     }

@@ -145,7 +145,7 @@ function WorkflowButtons() {
     p.font_detector!,
   ]
   const ocrChain: PipelinePick = (p) => [p.ocr!]
-  const translateChain: PipelinePick = (p) => [p.translator!]
+  const translateChain: PipelinePick = (p) => [p.translator!, p.renderer!]
   const inpaintChain: PipelinePick = (p) => [p.inpainter!]
   const renderChain: PipelinePick = (p) => [p.renderer!]
 

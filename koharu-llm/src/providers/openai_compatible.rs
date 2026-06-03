@@ -9,13 +9,6 @@ use crate::Language;
 use super::chat_completions::{ChatCompletionsAuth, ChatCompletionsRequest, send_chat_completion};
 use super::{AnyProvider, ensure_provider_success, resolve_system_prompt};
 
-/// Default sampling temperature for manga translation when the provider
-/// config doesn't pin one. Mirrors the local-model cap in koharu-app: low
-/// enough to keep output in a single script (no Chinese/Japanese leaking into
-/// Thai), high enough for natural phrasing and voice. Local servers otherwise
-/// default to ~0.8, which drifts.
-const DEFAULT_TRANSLATION_TEMPERATURE: f64 = 0.5;
-
 #[derive(Debug, Clone)]
 pub struct OpenAiCompatibleProvider {
     pub http_client: Arc<ClientWithMiddleware>,
@@ -96,7 +89,9 @@ impl AnyProvider for OpenAiCompatibleProvider {
                     model: model.to_string(),
                     system_prompt: prompt,
                     user_prompt: source.to_string(),
-                    temperature: self.temperature.or(Some(DEFAULT_TRANSLATION_TEMPERATURE)),
+                    // Let the server's own sampling defaults take effect unless
+                    // the user pinned a temperature in the provider config.
+                    temperature: self.temperature,
                     max_tokens: self.max_tokens,
                     // Many local "thinking" models (e.g. the Gemma uncensored
                     // finetunes) emit a long chain-of-thought that the server

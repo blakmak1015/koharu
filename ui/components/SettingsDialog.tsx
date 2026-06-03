@@ -22,6 +22,9 @@ import {
   LogInIcon,
   LogOutIcon,
   SparklesIcon,
+  LanguagesIcon,
+  PlusIcon,
+  Trash2Icon,
 } from 'lucide-react'
 import { useTheme } from 'next-themes'
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
@@ -85,6 +88,7 @@ import {
   isKeyBlocked,
   isModifierKey,
 } from '@/lib/shortcutUtils'
+import { useGlossaryStore } from '@/lib/stores/glossaryStore'
 import { usePreferencesStore } from '@/lib/stores/preferencesStore'
 
 // Dialog state models `AppConfig` (what `GET /config` returns — snake_case).
@@ -137,6 +141,7 @@ const TABS = [
   { id: 'appearance', icon: PaletteIcon, labelKey: 'settings.appearance' },
   { id: 'engines', icon: CpuIcon, labelKey: 'settings.engines' },
   { id: 'providers', icon: KeyIcon, labelKey: 'settings.apiKeys' },
+  { id: 'translation', icon: LanguagesIcon, labelKey: 'settings.translation' },
   { id: 'ai', icon: SparklesIcon, labelKey: 'settings.ai' },
   { id: 'keybinds', icon: KeyboardIcon, labelKey: 'settings.keybinds' },
   { id: 'runtime', icon: HardDriveIcon, labelKey: 'settings.runtime' },
@@ -397,6 +402,7 @@ export function SettingsDialog({
                   }}
                 />
               )}
+              {tab === 'translation' && <TranslationPane />}
               {tab === 'ai' && <CodexSettingsPane />}
               {tab === 'runtime' && (
                 <StoragePane
@@ -682,6 +688,211 @@ function ProvidersPane({
           })}
         </Accordion>
       </Section>
+    </div>
+  )
+}
+
+// ── Translation ───────────────────────────────────────────────────
+
+function TranslationPane() {
+  const { t } = useTranslation()
+  const customSystemPrompt = usePreferencesStore((s) => s.customSystemPrompt)
+  const setCustomSystemPrompt = usePreferencesStore((s) => s.setCustomSystemPrompt)
+
+  return (
+    <div className='space-y-6'>
+      <Section
+        title={t('settings.translationTitle', { defaultValue: 'Translation' })}
+        description={t('settings.translationDescription', {
+          defaultValue:
+            'Customize LLM translation behavior. The default manga translation prompt is always used; your custom prompt and glossary are appended to it.',
+        })}
+      >
+        <div className='space-y-4'>
+          <div className='space-y-1.5'>
+            <Label className='text-xs'>
+              {t('settings.translationSystemPrompt', {
+                defaultValue: 'Custom system prompt',
+              })}
+            </Label>
+            <textarea
+              value={customSystemPrompt ?? ''}
+              onChange={(e) => setCustomSystemPrompt(e.target.value || undefined)}
+              placeholder={t('settings.translationSystemPromptPlaceholder', {
+                defaultValue:
+                  'Additional instructions for the translator (e.g. character voice, tone, name conventions)...',
+              })}
+              rows={5}
+              className='flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 resize-y'
+            />
+            <p className='text-[11px] text-muted-foreground'>
+              {t('settings.translationSystemPromptHint', {
+                defaultValue:
+                  'This is appended after the default manga translation prompt. Leave empty to use only the default.',
+              })}
+            </p>
+          </div>
+        </div>
+      </Section>
+
+      <Section
+        title={t('settings.translationGlossary', { defaultValue: 'Glossary' })}
+        description={t('settings.translationGlossaryDescription', {
+          defaultValue:
+            'Keep names and special terms consistent across a series. The active glossary is automatically included in every translation.',
+        })}
+      >
+        <GlossaryInlineEditor />
+      </Section>
+    </div>
+  )
+}
+
+/**
+ * Inline glossary editor for the settings pane — same store as
+ * `GlossaryDialog`, but rendered directly instead of inside a dialog.
+ */
+function GlossaryInlineEditor() {
+  const { t } = useTranslation()
+  const glossaries = useGlossaryStore((s) => s.glossaries)
+  const activeGlossaryId = useGlossaryStore((s) => s.activeGlossaryId)
+  const createGlossary = useGlossaryStore((s) => s.createGlossary)
+  const deleteGlossary = useGlossaryStore((s) => s.deleteGlossary)
+  const renameGlossary = useGlossaryStore((s) => s.renameGlossary)
+  const setActiveGlossary = useGlossaryStore((s) => s.setActiveGlossary)
+  const setNotes = useGlossaryStore((s) => s.setNotes)
+  const addEntry = useGlossaryStore((s) => s.addEntry)
+  const updateEntry = useGlossaryStore((s) => s.updateEntry)
+  const removeEntry = useGlossaryStore((s) => s.removeEntry)
+
+  const active = glossaries.find((g) => g.id === activeGlossaryId)
+
+  return (
+    <div className='space-y-3'>
+      {/* Selector + create/delete */}
+      <div className='flex items-center gap-1.5'>
+        <Select
+          value={activeGlossaryId ?? '__none__'}
+          onValueChange={(v) => setActiveGlossary(v === '__none__' ? undefined : v)}
+        >
+          <SelectTrigger className='min-w-0 flex-1 h-8'>
+            <SelectValue placeholder='No glossary' />
+          </SelectTrigger>
+          <SelectContent position='popper'>
+            <SelectItem value='__none__'>No glossary (off)</SelectItem>
+            {glossaries.map((g) => (
+              <SelectItem key={g.id} value={g.id}>
+                {g.name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Button
+          variant='outline'
+          size='sm'
+          className='h-8 shrink-0 gap-1 text-xs'
+          onClick={() => createGlossary('New series')}
+        >
+          <PlusIcon className='size-3.5' />
+          New
+        </Button>
+        {active && (
+          <Button
+            variant='ghost'
+            size='sm'
+            className='h-8 shrink-0 px-2 text-destructive hover:text-destructive'
+            onClick={() => deleteGlossary(active.id)}
+          >
+            <Trash2Icon className='size-3.5' />
+          </Button>
+        )}
+      </div>
+
+      {active ? (
+        <div className='space-y-3'>
+          <Input
+            value={active.name}
+            onChange={(e) => renameGlossary(active.id, e.target.value)}
+            placeholder='Series name'
+            className='h-8 text-sm'
+          />
+
+          {/* Term pairs */}
+          <div className='space-y-1.5'>
+            <div className='flex items-center justify-between'>
+              <span className='text-[10px] font-medium text-muted-foreground uppercase'>
+                Terms
+              </span>
+              <Button
+                variant='ghost'
+                size='xs'
+                className='h-6 gap-1 px-1.5 text-[11px]'
+                onClick={() => addEntry(active.id)}
+              >
+                <PlusIcon className='size-3' />
+                Add term
+              </Button>
+            </div>
+            <ScrollArea className='max-h-48'>
+              <div className='flex flex-col gap-1.5 pr-2'>
+                {active.entries.length === 0 ? (
+                  <p className='py-2 text-center text-xs text-muted-foreground'>
+                    No terms yet. Add a source → target pair.
+                  </p>
+                ) : (
+                  active.entries.map((entry, index) => (
+                    <div key={index} className='flex items-center gap-1.5'>
+                      <Input
+                        value={entry.source}
+                        onChange={(e) =>
+                          updateEntry(active.id, index, { source: e.target.value })
+                        }
+                        placeholder='Source'
+                        className='h-7 text-xs'
+                      />
+                      <span className='shrink-0 text-muted-foreground text-xs'>→</span>
+                      <Input
+                        value={entry.target}
+                        onChange={(e) =>
+                          updateEntry(active.id, index, { target: e.target.value })
+                        }
+                        placeholder='Target'
+                        className='h-7 text-xs'
+                      />
+                      <Button
+                        variant='ghost'
+                        size='xs'
+                        className='h-7 shrink-0 px-1 text-muted-foreground hover:text-destructive'
+                        onClick={() => removeEntry(active.id, index)}
+                      >
+                        <Trash2Icon className='size-3' />
+                      </Button>
+                    </div>
+                  ))
+                )}
+              </div>
+            </ScrollArea>
+          </div>
+
+          {/* Notes */}
+          <div className='space-y-1'>
+            <span className='text-[10px] font-medium text-muted-foreground uppercase'>
+              Tone / context notes
+            </span>
+            <textarea
+              value={active.notes ?? ''}
+              onChange={(e) => setNotes(active.id, e.target.value)}
+              placeholder='e.g. casual tone; characters speak politely'
+              rows={2}
+              className='flex w-full rounded-md border border-input bg-background px-3 py-2 text-xs ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 resize-y'
+            />
+          </div>
+        </div>
+      ) : (
+        <p className='py-4 text-center text-xs text-muted-foreground'>
+          Create a glossary to keep terminology consistent across a series.
+        </p>
+      )}
     </div>
   )
 }

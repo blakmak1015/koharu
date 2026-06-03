@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { fitCanvasToViewport, resetCanvasScale } from '@/components/Canvas'
+import { CustomProcessDialog } from '@/components/CustomProcessDialog'
 import { SettingsDialog, type TabId } from '@/components/SettingsDialog'
 import {
   Menubar,
@@ -63,6 +64,7 @@ export function MenuBar() {
   const { t } = useTranslation()
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [settingsTab, setSettingsTab] = useState<TabId>('appearance')
+  const [customProcessOpen, setCustomProcessOpen] = useState(false)
   const hasPage = useSelectionStore((s) => s.pageId !== null)
   const hasScene = useScene().scene !== null
   const shortcuts = usePreferencesStore((state) => state.shortcuts)
@@ -100,10 +102,54 @@ export function MenuBar() {
     })
   }
 
-  const runInpaint = async (pageId: string) => {
+  const runTranslateRender = async (opts?: { pageId?: string }) => {
     const cfg = await getConfig()
-    if (!cfg.pipeline?.inpainter) return
-    await startPipeline({ steps: [cfg.pipeline.inpainter], pages: [pageId] })
+    const steps = [cfg.pipeline?.translator, cfg.pipeline?.inpainter, cfg.pipeline?.renderer].filter(
+      (s): s is string => !!s,
+    )
+    if (steps.length === 0) return
+    const editor = useEditorUiStore.getState()
+    const prefs = usePreferencesStore.getState()
+    await startPipeline({
+      steps,
+      ...(opts?.pageId ? { pages: [opts.pageId] } : {}),
+      targetLanguage: editor.selectedLanguage,
+      systemPrompt: buildSystemPrompt(prefs.customSystemPrompt),
+      defaultFont: prefs.defaultFont,
+      readingOrder: editor.readingOrder === 'custom' ? undefined : editor.readingOrder,
+    })
+  }
+
+  const runInpaintRender = async (opts?: { pageId?: string }) => {
+    const cfg = await getConfig()
+    const steps = [cfg.pipeline?.inpainter, cfg.pipeline?.renderer].filter(
+      (s): s is string => !!s,
+    )
+    if (steps.length === 0) return
+    const editor = useEditorUiStore.getState()
+    const prefs = usePreferencesStore.getState()
+    await startPipeline({
+      steps,
+      ...(opts?.pageId ? { pages: [opts.pageId] } : {}),
+      targetLanguage: editor.selectedLanguage,
+      defaultFont: prefs.defaultFont,
+    })
+  }
+
+  const runRenderOnly = async (opts?: { pageId?: string }) => {
+    const cfg = await getConfig()
+    const steps = [cfg.pipeline?.renderer].filter(
+      (s): s is string => !!s,
+    )
+    if (steps.length === 0) return
+    const editor = useEditorUiStore.getState()
+    const prefs = usePreferencesStore.getState()
+    await startPipeline({
+      steps,
+      ...(opts?.pageId ? { pages: [opts.pageId] } : {}),
+      targetLanguage: editor.selectedLanguage,
+      defaultFont: prefs.defaultFont,
+    })
   }
 
   const exportItems: MenuItem[] = [
@@ -153,7 +199,7 @@ export function MenuBar() {
         },
         {
           label: t('menu.redoInpaintRender'),
-          onSelect: () => void runInpaint(requirePageId()),
+          onSelect: () => void runInpaintRender({ pageId: requirePageId() }),
           disabled: !hasPage,
           testId: 'menu-process-rerender',
         },
@@ -162,6 +208,30 @@ export function MenuBar() {
           onSelect: () => void runPipeline({}),
           disabled: !hasScene,
           testId: 'menu-process-all',
+        },
+        {
+          label: t('menu.translateAll'),
+          onSelect: () => void runTranslateRender({}),
+          disabled: !hasScene,
+          testId: 'menu-translate-all',
+        },
+        {
+          label: t('menu.redoInpaintRenderAll'),
+          onSelect: () => void runInpaintRender({}),
+          disabled: !hasScene,
+          testId: 'menu-process-rerender-all',
+        },
+        {
+          label: t('menu.renderAll'),
+          onSelect: () => void runRenderOnly({}),
+          disabled: !hasScene,
+          testId: 'menu-render-all',
+        },
+        {
+          label: t('menu.customProcess'),
+          onSelect: () => setCustomProcessOpen(true),
+          disabled: !hasScene,
+          testId: 'menu-custom-process',
         },
       ],
     },
@@ -343,6 +413,7 @@ export function MenuBar() {
       <div data-tauri-drag-region className='flex h-full flex-1 items-center justify-center' />
       {isWindowsTauri && <WindowControls />}
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} defaultTab={settingsTab} />
+      <CustomProcessDialog open={customProcessOpen} onOpenChange={setCustomProcessOpen} />
     </div>
   )
 }

@@ -124,22 +124,34 @@ fn normalize_font_prediction(p: &mut koharu_ml::types::FontPrediction) {
     }
 }
 
+fn luminance(c: [u8; 3]) -> f32 {
+    0.299 * c[0] as f32 + 0.587 * c[1] as f32 + 0.114 * c[2] as f32
+}
+
 fn clamp_black(c: [u8; 3]) -> [u8; 3] {
+    // Per-channel check (original): generous for grays, strict for chromatic.
     let t = if gray(c) { 60 } else { 12 };
     if c[0] <= t && c[1] <= t && c[2] <= t {
-        [0, 0, 0]
-    } else {
-        c
+        return [0, 0, 0];
     }
+    // Luminance fallback: catch dark-but-slightly-chromatic predictions
+    // (e.g. [30, 5, 10] from B&W manga) that the per-channel check misses.
+    if luminance(c) < 40.0 {
+        return [0, 0, 0];
+    }
+    c
 }
 
 fn clamp_white(c: [u8; 3]) -> [u8; 3] {
     let t = 255 - if gray(c) { 60 } else { 12 };
     if c[0] >= t && c[1] >= t && c[2] >= t {
-        [255, 255, 255]
-    } else {
-        c
+        return [255, 255, 255];
     }
+    // Luminance fallback: catch bright-but-slightly-chromatic predictions.
+    if luminance(c) > 215.0 {
+        return [255, 255, 255];
+    }
+    c
 }
 
 fn gray(c: [u8; 3]) -> bool {

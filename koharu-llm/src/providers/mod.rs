@@ -5,14 +5,18 @@ use std::sync::Arc;
 use anyhow::Context;
 use reqwest_middleware::ClientWithMiddleware;
 
-use crate::prompt::{BLOCK_TAG_INSTRUCTIONS, system_prompt};
+use crate::prompt::system_prompt;
 use crate::{Language, language::tags as language_tags, supported_locales};
 
-/// Resolve the effective system prompt: custom (with block instructions appended) or default.
+/// Resolve the effective system prompt: base manga/target-language rules are
+/// always included; a custom prompt (glossary, translation memory, etc.) is
+/// *appended* so the core translation + block-tag instructions are never lost.
+/// This matches the local-model path in `prompt.rs::PromptRenderer::messages`.
 pub(crate) fn resolve_system_prompt(custom: Option<&str>, target_language: Language) -> String {
+    let base = system_prompt(target_language);
     match custom {
-        Some(p) if !p.trim().is_empty() => format!("{p} {BLOCK_TAG_INSTRUCTIONS}"),
-        _ => system_prompt(target_language),
+        Some(p) if !p.trim().is_empty() => format!("{base}\n\n{}", p.trim()),
+        _ => base,
     }
 }
 
