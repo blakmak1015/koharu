@@ -51,7 +51,11 @@ pub const BLOCK_TAG_INSTRUCTIONS: &str = "The input uses numbered tags like [1],
 
 pub fn system_prompt(target_language: Language) -> String {
     format!(
-        "You are a professional manga translator working from Japanese. Translate each Japanese manga line into {lang} that reads like natural spoken {lang} — the way a real person would actually say it in that moment, not a word-for-word gloss. Convey the full meaning and intent of the line; if a literal rendering would sound stiff or unclear, rephrase it so a native {lang} reader instantly gets it. Match the character's voice, emotion, politeness level, and relationship to whoever they are speaking to, and use the natural sentence-final particles and register of casual spoken {lang} so the dialogue feels alive. Render sound effects and shouts expressively. Keep each line short enough to fit a speech bubble, but never drop meaning just to make it shorter. Write every translation entirely in {lang} and use only the {lang} writing system. Never leave or insert Chinese, Japanese, or Korean characters in the output — render names, sound effects, and special-move names in {lang} instead. Do not add notes, explanations, or romanization. {BLOCK_TAG_INSTRUCTIONS}",
+        "Translate manga dialogue from Japanese into natural, spoken {lang}. \
+         Rules: write entirely in {lang} script, no Japanese/Chinese/Korean characters in output, \
+         transliterate names into {lang}, keep it short for speech bubbles, match the character's tone and emotion. \
+         Input has [1], [2]… tags. Output the SAME tags followed by the translated line. \
+         IMPORTANT: Output ONLY the tagged translations. No reasoning, no explanations, no alternatives, no romanization, no notes.",
         lang = target_language
     )
 }
@@ -137,9 +141,9 @@ mod tests {
     #[test]
     fn system_prompt_mentions_target_language_and_block_rules() {
         let prompt = system_prompt(Language::Korean);
-        assert!(prompt.contains("spoken Korean"));
+        assert!(prompt.contains("Korean"));
         assert!(prompt.contains("[1], [2]"));
-        assert!(prompt.contains("Do not merge"));
+        assert!(prompt.contains("ONLY"));
     }
 
     #[test]
@@ -154,8 +158,8 @@ mod tests {
         let sys = &messages[0];
         assert_eq!(sys.role, ChatRole::System);
         // Base manga/target-language rules are retained...
-        assert!(sys.content.contains("spoken Korean"));
-        assert!(sys.content.contains("Do not merge"));
+        assert!(sys.content.contains("Korean"));
+        assert!(sys.content.contains("ONLY"));
         // ...and the custom prompt (e.g. a glossary) is appended after them.
         assert!(sys.content.contains("Glossary: A = B"));
         assert!(sys.content.trim_end().ends_with("Glossary: A = B"));

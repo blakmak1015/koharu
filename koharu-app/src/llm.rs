@@ -253,6 +253,7 @@ impl Model {
         }?;
 
         let translation = strip_thinking_block(&translation);
+        let translation = strip_reasoning_preamble(translation);
         let out = match parse_tagged_blocks(translation, sources.len())? {
             Some(blocks) => blocks,
             None => split_legacy_lines(translation, sources.len()),
@@ -537,6 +538,51 @@ fn strip_thinking_block(text: &str) -> &str {
         return text[start + end + "</think>".len()..].trim_start();
     }
     text
+}
+
+/// Strip verbose reasoning / chain-of-thought that some models (especially
+/// small "thinking" models like Gemma uncensored variants) emit as plain text
+/// before the actual translation. Common patterns:
+///
+/// - `REASONING\n...\n\n<actual translation>`
+/// - `Here's a thinking process...\n...\n\n<actual translation>`
+/// - `Let me translate...\n\n<actual translation>`
+///
+/// The heuristic: if the response starts with English reasoning text but
+/// contains tagged blocks `[1]...` somewhere inside, extract from the first
+/// tag onward. This is safe because tagged output is the only thing we asked
+/// for, so anything before the first tag is unwanted preamble.
+fn strip_reasoning_preamble(text: &str) -> &str {
+    // Fast path: already starts with a tag → nothing to strip.
+    let trimmed = text.trim_start();
+    if trimmed.starts_with('[') {
+        return trimmed;
+    }
+    // Find the first `[N]` block tag in the text.
+    if let Some(pos) = find_first_block_tag(trimmed) {
+        return trimmed[pos..].trim_start();
+    }
+    trimmed
+}
+
+/// Find byte offset of the first `[N]` block tag (where N is a positive integer)
+/// at the start of a line.
+fn find_first_block_tag(text: &str) -> Option<usize> {
+    let mut offset = 0;
+    for line in text.lines() {
+        let stripped = line.trim_start();
+        if stripped.starts_with('[') {
+            if let Some(end) = stripped[1..].find(']') {
+                let num_str = &stripped[1..1 + end];
+                if num_str.parse::<usize>().is_ok() {
+                    let indent = line.len() - stripped.len();
+                    return Some(offset + indent);
+                }
+            }
+        }
+        offset += line.len() + 1; // +1 for newline
+    }
+    None
 }
 
 fn strip_wrapping_quotes(text: &str) -> String {
