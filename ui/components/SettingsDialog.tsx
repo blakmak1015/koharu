@@ -25,11 +25,13 @@ import {
   LanguagesIcon,
   PlusIcon,
   Trash2Icon,
+  BotIcon,
 } from 'lucide-react'
 import { useTheme } from 'next-themes'
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 
+import { AgentPanel } from '@/components/AgentPanel'
 import {
   Accordion,
   AccordionItem,
@@ -88,6 +90,7 @@ import {
   isKeyBlocked,
   isModifierKey,
 } from '@/lib/shortcutUtils'
+import { useAuthStore } from '@/lib/stores/authStore'
 import { useGlossaryStore } from '@/lib/stores/glossaryStore'
 import { usePreferencesStore } from '@/lib/stores/preferencesStore'
 
@@ -137,18 +140,22 @@ async function updateConfig(next: UpdateConfigBody): Promise<AppConfig> {
 
 const GITHUB_REPO = 'mayocream/koharu'
 
-const TABS = [
-  { id: 'appearance', icon: PaletteIcon, labelKey: 'settings.appearance' },
-  { id: 'engines', icon: CpuIcon, labelKey: 'settings.engines' },
-  { id: 'providers', icon: KeyIcon, labelKey: 'settings.apiKeys' },
-  { id: 'translation', icon: LanguagesIcon, labelKey: 'settings.translation' },
-  { id: 'ai', icon: SparklesIcon, labelKey: 'settings.ai' },
-  { id: 'keybinds', icon: KeyboardIcon, labelKey: 'settings.keybinds' },
-  { id: 'runtime', icon: HardDriveIcon, labelKey: 'settings.runtime' },
-  { id: 'about', icon: InfoIcon, labelKey: 'settings.about' },
+const ALL_TABS = [
+  { id: 'appearance', icon: PaletteIcon, labelKey: 'settings.appearance', staffOnly: false },
+  { id: 'engines', icon: CpuIcon, labelKey: 'settings.engines', staffOnly: true },
+  { id: 'providers', icon: KeyIcon, labelKey: 'settings.apiKeys', staffOnly: true },
+  { id: 'translation', icon: LanguagesIcon, labelKey: 'settings.translation', staffOnly: true },
+  { id: 'ai', icon: SparklesIcon, labelKey: 'settings.ai', staffOnly: true },
+  { id: 'keybinds', icon: KeyboardIcon, labelKey: 'settings.keybinds', staffOnly: false },
+  { id: 'runtime', icon: HardDriveIcon, labelKey: 'settings.runtime', staffOnly: false },
+  { id: 'agent', icon: BotIcon, labelKey: 'settings.agent', staffOnly: true },
+  { id: 'about', icon: InfoIcon, labelKey: 'settings.about', staffOnly: true },
 ] as const
 
-export type TabId = (typeof TABS)[number]['id']
+/** @deprecated use ALL_TABS with role filtering */
+const TABS = ALL_TABS
+
+export type TabId = (typeof ALL_TABS)[number]['id']
 
 type SettingsDialogProps = {
   open: boolean
@@ -167,6 +174,11 @@ export function SettingsDialog({
 }: SettingsDialogProps) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
+  const isStaff = useAuthStore((s) => s.isStaff)
+  const visibleTabs = useMemo(
+    () => ALL_TABS.filter((tab) => !tab.staffOnly || isStaff),
+    [isStaff],
+  )
   const [tab, setTab] = useState<TabId>(defaultTab)
   useEffect(() => {
     if (open) setTab(defaultTab)
@@ -329,7 +341,7 @@ export function SettingsDialog({
             <p className='mb-3 px-3 text-[10px] font-semibold tracking-widest text-muted-foreground uppercase'>
               {t('settings.title')}
             </p>
-            {TABS.map(({ id, icon: Icon, labelKey }) => (
+            {visibleTabs.map(({ id, icon: Icon, labelKey }) => (
               <button
                 key={id}
                 onClick={() => setTab(id)}
@@ -433,6 +445,7 @@ export function SettingsDialog({
                 />
               )}
               {tab === 'keybinds' && <KeybindsPane />}
+              {tab === 'agent' && <AgentSettingsPane />}
               {tab === 'about' && (
                 <AboutPane
                   version={appVersion}
@@ -1552,6 +1565,19 @@ function AboutPane({
         </div>
       </div>
     </div>
+  )
+}
+
+// ── Agent ────────────────────────────────────────────────────────
+
+function AgentSettingsPane() {
+  return (
+    <Section
+      title='Translation Agent'
+      description='Auto-translate mode: koharu polls the website queue, claims jobs, processes them through the pipeline, and submits results automatically.'
+    >
+      <AgentPanel />
+    </Section>
   )
 }
 

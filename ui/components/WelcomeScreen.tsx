@@ -25,11 +25,11 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { WebsiteDialog } from '@/components/WebsiteDialog'
 import { useListProjects } from '@/lib/api/default/default'
 import type { ProjectSummary } from '@/lib/api/schemas'
 import { importKhrFile } from '@/lib/io/pagesIo'
 import { createAndOpenProject, switchProject } from '@/lib/io/scene'
+import { useAuthStore } from '@/lib/stores/authStore'
 import { cn } from '@/lib/utils'
 
 type Busy = false | 'new' | 'open' | 'import'
@@ -41,6 +41,8 @@ type Busy = false | 'new' | 'open' | 'import'
  */
 export function WelcomeScreen() {
   const { t } = useTranslation()
+  const isStaff = useAuthStore((s) => s.isStaff)
+  const setWebsiteDialogOpen = useAuthStore((s) => s.setWebsiteDialogOpen)
   const { data: projectsData, refetch: refetchProjects } = useListProjects()
   const projects = useMemo(() => {
     const all = projectsData?.projects ?? []
@@ -50,7 +52,6 @@ export function WelcomeScreen() {
   const [busy, setBusy] = useState<Busy>(false)
   const [error, setError] = useState<string | null>(null)
   const [newDialogOpen, setNewDialogOpen] = useState(false)
-  const [websiteOpen, setWebsiteOpen] = useState(false)
 
   const openById = useCallback(async (id: string) => {
     setError(null)
@@ -124,51 +125,57 @@ export function WelcomeScreen() {
         )}
 
         <div className='mt-4 flex flex-col gap-2.5'>
-          <PrimaryAction
-            onClick={() => setNewDialogOpen(true)}
-            disabled={!!busy}
-            loading={busy === 'new'}
-            title={t('welcome.new')}
-            description={t('welcome.newDescription')}
-          />
+          {isStaff && (
+            <PrimaryAction
+              onClick={() => setNewDialogOpen(true)}
+              disabled={!!busy}
+              loading={busy === 'new'}
+              title={t('welcome.new')}
+              description={t('welcome.newDescription')}
+            />
+          )}
+          {isStaff && (
+            <SecondaryAction
+              onClick={importKhr}
+              disabled={!!busy}
+              loading={busy === 'import'}
+              icon={<FileArchiveIcon className='h-4 w-4' />}
+              label={t('welcome.importKhr')}
+            />
+          )}
           <SecondaryAction
-            onClick={importKhr}
-            disabled={!!busy}
-            loading={busy === 'import'}
-            icon={<FileArchiveIcon className='h-4 w-4' />}
-            label={t('welcome.importKhr')}
-          />
-          <SecondaryAction
-            onClick={() => setWebsiteOpen(true)}
+            onClick={() => setWebsiteDialogOpen(true)}
             disabled={!!busy}
             icon={<GlobeIcon className='h-4 w-4' />}
             label='Translate from website'
           />
         </div>
 
-        <section className='flex flex-col gap-2'>
-          <div className='flex items-baseline justify-between px-0.5'>
-            <h2 className='text-[10px] font-semibold tracking-[0.14em] text-muted-foreground uppercase'>
-              {t('welcome.projects')}
-            </h2>
-            {projects.length > 0 && (
-              <span className='text-[10px] text-muted-foreground tabular-nums'>
-                {projects.length}
-              </span>
+        {isStaff && (
+          <section className='flex flex-col gap-2'>
+            <div className='flex items-baseline justify-between px-0.5'>
+              <h2 className='text-[10px] font-semibold tracking-[0.14em] text-muted-foreground uppercase'>
+                {t('welcome.projects')}
+              </h2>
+              {projects.length > 0 && (
+                <span className='text-[10px] text-muted-foreground tabular-nums'>
+                  {projects.length}
+                </span>
+              )}
+            </div>
+            {projects.length > 0 ? (
+              <ScrollArea className='h-48 rounded-lg border border-border/60 bg-card/30'>
+                <ul className='flex flex-col divide-y divide-border/40'>
+                  {projects.map((p) => (
+                    <ProjectRow key={p.id} project={p} onOpen={openById} disabled={busy === 'open'} />
+                  ))}
+                </ul>
+              </ScrollArea>
+            ) : (
+              <RecentSkeleton />
             )}
-          </div>
-          {projects.length > 0 ? (
-            <ScrollArea className='h-48 rounded-lg border border-border/60 bg-card/30'>
-              <ul className='flex flex-col divide-y divide-border/40'>
-                {projects.map((p) => (
-                  <ProjectRow key={p.id} project={p} onOpen={openById} disabled={busy === 'open'} />
-                ))}
-              </ul>
-            </ScrollArea>
-          ) : (
-            <RecentSkeleton />
-          )}
-        </section>
+          </section>
+        )}
       </div>
 
       <NewProjectDialog
@@ -177,8 +184,6 @@ export function WelcomeScreen() {
         onSubmit={onCreate}
         busy={busy === 'new'}
       />
-
-      <WebsiteDialog open={websiteOpen} onOpenChange={setWebsiteOpen} />
     </div>
   )
 }

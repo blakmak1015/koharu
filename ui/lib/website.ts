@@ -78,7 +78,7 @@ export async function pollDeviceToken(deviceCode: string): Promise<string | null
 }
 
 // --- workflow ---
-export type Me = { id: string; email: string; name: string; isAdmin: boolean; tokenBalance: number }
+export type Me = { id: string; email: string; name: string; role: string; isAdmin: boolean; tokenBalance: number }
 export type Chapter = { id: string; seriesTitle: string; chapterNo: string; rewardTokens: number }
 export type ChapterDetail = Chapter & {
   status: string
@@ -93,6 +93,7 @@ export async function getMe(t: string): Promise<Me> {
     id: raw.id,
     email: raw.email,
     name: raw.displayName || raw.email,
+    role: raw.role ?? 'user',
     isAdmin: raw.role === 'admin',
     tokenBalance: raw.credits ?? 0,
   }

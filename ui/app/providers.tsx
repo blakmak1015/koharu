@@ -5,6 +5,7 @@ import { ThemeProvider } from 'next-themes'
 import { useEffect, type ReactNode } from 'react'
 import { I18nextProvider } from 'react-i18next'
 
+import { AuthGate } from '@/components/AuthGate'
 import ClientOnly from '@/components/ClientOnly'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { UpdaterProvider } from '@/components/Updater'
@@ -32,7 +33,9 @@ export function Providers({ children }: { children: ReactNode }) {
         <ClientOnly>
           <I18nextProvider i18n={i18n}>
             <TooltipProvider delayDuration={0}>
-              <UpdaterProvider>{children}</UpdaterProvider>
+              <UpdaterProvider>
+                <AuthGate>{children}</AuthGate>
+              </UpdaterProvider>
             </TooltipProvider>
           </I18nextProvider>
         </ClientOnly>

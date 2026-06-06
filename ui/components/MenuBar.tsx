@@ -1,6 +1,6 @@
 'use client'
 
-import { CopyIcon, MinusIcon, SquareIcon, XIcon } from 'lucide-react'
+import { CopyIcon, GlobeIcon, LogOutIcon, MinusIcon, SquareIcon, XIcon } from 'lucide-react'
 import Image from 'next/image'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -23,6 +23,7 @@ import { isTauri, openExternalUrl } from '@/lib/backend'
 import { exportCurrentProjectAs, importPages } from '@/lib/io/pagesIo'
 import { closeProject, redoOp, selectAllTextNodesOnCurrentPage, undoOp } from '@/lib/io/scene'
 import { formatShortcutForDisplay, getPlatform } from '@/lib/shortcutUtils'
+import { useAuthStore } from '@/lib/stores/authStore'
 import { useEditorUiStore } from '@/lib/stores/editorUiStore'
 import { buildSystemPrompt } from '@/lib/stores/glossaryStore'
 import { usePreferencesStore } from '@/lib/stores/preferencesStore'
@@ -65,6 +66,9 @@ export function MenuBar() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [settingsTab, setSettingsTab] = useState<TabId>('appearance')
   const [customProcessOpen, setCustomProcessOpen] = useState(false)
+  const isStaff = useAuthStore((s) => s.isStaff)
+  const setWebsiteDialogOpen = useAuthStore((s) => s.setWebsiteDialogOpen)
+  const logout = useAuthStore((s) => s.logout)
   const hasPage = useSelectionStore((s) => s.pageId !== null)
   const hasScene = useScene().scene !== null
   const shortcuts = usePreferencesStore((state) => state.shortcuts)
@@ -263,33 +267,39 @@ export function MenuBar() {
             {t('menu.file')}
           </MenubarTrigger>
           <MenubarContent className='min-w-48' align='start' sideOffset={5} alignOffset={-3}>
-            <MenubarItem
-              data-testid='menu-file-open-files'
-              className='text-[13px]'
-              disabled={!hasScene}
-              onSelect={() => void importPages('replace', 'files')}
-            >
-              {t('menu.openFiles')}
-            </MenubarItem>
-            <MenubarItem
-              data-testid='menu-file-open-folder'
-              className='text-[13px]'
-              disabled={!hasScene}
-              onSelect={() => void importPages('replace', 'folder')}
-            >
-              {t('menu.openFolder')}
-            </MenubarItem>
-            <MenubarSeparator />
-            <MenubarItem
-              data-testid='menu-file-save-as'
-              className='text-[13px]'
-              disabled={!hasScene}
-              onSelect={() => void exportCurrentProjectAs('khr')}
-            >
-              {t('menu.saveAs')}
-            </MenubarItem>
-            <MenubarSeparator />
-            {exportItems.map((item) => (
+            {isStaff && (
+              <MenubarItem
+                data-testid='menu-file-open-files'
+                className='text-[13px]'
+                disabled={!hasScene}
+                onSelect={() => void importPages('replace', 'files')}
+              >
+                {t('menu.openFiles')}
+              </MenubarItem>
+            )}
+            {isStaff && (
+              <MenubarItem
+                data-testid='menu-file-open-folder'
+                className='text-[13px]'
+                disabled={!hasScene}
+                onSelect={() => void importPages('replace', 'folder')}
+              >
+                {t('menu.openFolder')}
+              </MenubarItem>
+            )}
+            {isStaff && <MenubarSeparator />}
+            {isStaff && (
+              <MenubarItem
+                data-testid='menu-file-save-as'
+                className='text-[13px]'
+                disabled={!hasScene}
+                onSelect={() => void exportCurrentProjectAs('khr')}
+              >
+                {t('menu.saveAs')}
+              </MenubarItem>
+            )}
+            {isStaff && <MenubarSeparator />}
+            {isStaff && exportItems.map((item) => (
               <MenubarItem
                 key={item.label}
                 data-testid={item.testId}
@@ -300,6 +310,14 @@ export function MenuBar() {
                 {item.label}
               </MenubarItem>
             ))}
+            {isStaff && <MenubarSeparator />}
+            <MenubarItem
+              className='text-[13px]'
+              onSelect={() => setWebsiteDialogOpen(true)}
+            >
+              <GlobeIcon className='mr-2 h-4 w-4' />
+              Website...
+            </MenubarItem>
             <MenubarSeparator />
             <MenubarItem
               data-testid='menu-file-close-project'
@@ -318,6 +336,14 @@ export function MenuBar() {
               }}
             >
               {t('menu.settings')}
+            </MenubarItem>
+            <MenubarSeparator />
+            <MenubarItem
+              className='text-[13px]'
+              onSelect={() => void logout()}
+            >
+              <LogOutIcon className='mr-2 h-4 w-4' />
+              Logout
             </MenubarItem>
           </MenubarContent>
         </MenubarMenu>

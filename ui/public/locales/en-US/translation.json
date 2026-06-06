@@ -389,6 +389,7 @@
     "localLlmAdvanced": "Advanced",
     "appConfig": "App Config",
     "runtime": "Runtime",
+    "agent": "Agent",
     "renderingFont": "Rendering Font",
     "renderingFontDescription": "Font used when rendering translated text onto images.",
     "providersDescription": "Configure API keys and endpoints for LLM providers.",
