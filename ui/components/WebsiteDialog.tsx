@@ -6,6 +6,7 @@
 // translation back. Heavy ML + editing use koharu's normal flow.
 import { useCallback, useEffect, useState } from 'react'
 
+import { AgentPanel } from '@/components/AgentPanel'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import {
@@ -17,7 +18,10 @@ import {
 } from '@/components/ui/dialog'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { openExternalUrl } from '@/lib/backend'
+import { getConfig, startPipeline } from '@/lib/api/default/default'
 import { createAndOpenProject, uploadPages } from '@/lib/io/scene'
+import { useJobsStore } from '@/lib/stores/jobsStore'
+import { usePreferencesStore } from '@/lib/stores/preferencesStore'
 import {
   type Chapter,
   type Me,
@@ -51,6 +55,36 @@ function saveActiveJob(job: ActiveJob | null) {
   else localStorage.removeItem(ACTIVE_JOB_KEY)
 }
 
+// Wait for a koharu pipeline job (tracked by SSE → jobsStore) to finish.
+async function waitForJob(jobId: string, timeoutMs = 180_000): Promise<void> {
+  const start = Date.now()
+  while (Date.now() - start < timeoutMs) {
+    const job = useJobsStore.getState().jobs[jobId]
+    if (job?.status === 'completed') return
+    if (job?.status === 'failed') {
+      throw new Error(job.error ?? 'Pipeline failed')
+    }
+    await new Promise((r) => setTimeout(r, 500))
+  }
+  throw new Error('Render pipeline timed out')
+}
+
+// Run the renderer step on all pages so every page has a rendered layer.
+async function renderAllPages(pageIds: string[]): Promise<void> {
+  const cfg = await getConfig()
+  const renderer = cfg.pipeline?.renderer
+  if (!renderer) {
+    throw new Error('No renderer configured in pipeline settings')
+  }
+  const defaultFont = usePreferencesStore.getState().defaultFont
+  const { operationId } = await startPipeline({
+    steps: [renderer],
+    pages: pageIds,
+    defaultFont,
+  })
+  await waitForJob(operationId)
+}
+
 // Export each page of the current koharu project as a rendered PNG blob.
 async function exportRenderedBlobs(pageIds: string[]): Promise<Blob[]> {
   const blobs: Blob[] = []
@@ -62,7 +96,7 @@ async function exportRenderedBlobs(pageIds: string[]): Promise<Blob[]> {
     })
     if (!res.ok) {
       throw new Error(
-        'Could not export a rendered page. Run "Process" (translate) on every page first, then submit.',
+        `Could not export rendered page "${id}". Ensure all pages have been processed.`,
       )
     }
     blobs.push(await res.blob())
@@ -176,8 +210,13 @@ export function WebsiteDialog({
   const onSubmit = useCallback(async () => {
     if (!token || !activeJob) return
     setBusy(true)
-    setMsg('Rendering & submitting…')
     try {
+      // Step 1: render all pages so the "rendered" layer is up to date
+      setMsg('Rendering all pages…')
+      await renderAllPages(activeJob.pageIds)
+
+      // Step 2: export rendered blobs and submit to website
+      setMsg('Exporting & submitting…')
       const blobs = await exportRenderedBlobs(activeJob.pageIds)
       const res = await submitPages(activeJob.chapterId, blobs, token)
       setMsg(`Submitted ${res.pageCount} page(s). Awaiting review.`)
@@ -257,6 +296,12 @@ export function WebsiteDialog({
         )}
 
         {msg && <p className='text-sm text-muted-foreground'>{msg}</p>}
+
+        {/* Agent auto-translate mode */}
+        <div className='border-t pt-3'>
+          <h3 className='mb-2 text-sm font-medium'>Auto-translate agent</h3>
+          <AgentPanel />
+        </div>
       </DialogContent>
     </Dialog>
   )
