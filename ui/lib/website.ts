@@ -55,7 +55,11 @@ export type DeviceCode = {
 }
 
 export const startDeviceLogin = (): Promise<DeviceCode> =>
-  web('/api/auth/device/code', { method: 'POST' })
+  web('/api/auth/device/code', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ client_name: 'koharu' }),
+  })
 
 // Returns the access token once approved, or null while still pending.
 // The website returns HTTP 400 with { error: "authorization_pending" } while waiting.
