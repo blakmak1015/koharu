@@ -18,7 +18,7 @@ import {
 } from '@/components/ui/dialog'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { openExternalUrl } from '@/lib/backend'
-import { getConfig, startPipeline } from '@/lib/api/default/default'
+import { getConfig, getSceneJson, startPipeline } from '@/lib/api/default/default'
 import { createAndOpenProject, uploadPages } from '@/lib/io/scene'
 import { useJobsStore } from '@/lib/stores/jobsStore'
 import { usePreferencesStore } from '@/lib/stores/preferencesStore'
@@ -69,8 +69,23 @@ async function waitForJob(jobId: string, timeoutMs = 180_000): Promise<void> {
   throw new Error('Render pipeline timed out')
 }
 
+// Check whether koharu has a project currently open.
+async function hasOpenProject(): Promise<boolean> {
+  try {
+    const snap = await getSceneJson()
+    return !!snap?.scene?.project
+  } catch {
+    return false
+  }
+}
+
 // Run the renderer step on all pages so every page has a rendered layer.
 async function renderAllPages(pageIds: string[]): Promise<void> {
+  if (!(await hasOpenProject())) {
+    throw new Error(
+      'No project open in koharu. Open the project you were editing first, then submit.',
+    )
+  }
   const cfg = await getConfig()
   const renderer = cfg.pipeline?.renderer
   if (!renderer) {
@@ -137,8 +152,11 @@ export function WebsiteDialog({
       setTok(t)
       try {
         await refresh(t)
-      } catch {
-        setTok(null) // token expired
+      } catch (e) {
+        // Don't clear the token on refresh failure — the token might still
+        // be valid; the website could just be temporarily unreachable.
+        console.warn('refresh failed (token kept):', e)
+        setMsg('Could not load chapters. Check your connection and try reopening.')
       }
     })()
   }, [open, refresh])
@@ -297,11 +315,17 @@ export function WebsiteDialog({
 
         {msg && <p className='text-sm text-muted-foreground'>{msg}</p>}
 
-        {/* Agent auto-translate mode */}
-        <div className='border-t pt-3'>
-          <h3 className='mb-2 text-sm font-medium'>Auto-translate agent</h3>
+        {/* Agent auto-translate mode (admin only — needs agent token) */}
+        <details className='border-t pt-3'>
+          <summary className='cursor-pointer text-sm font-medium text-muted-foreground hover:text-foreground'>
+            Auto-translate agent (server mode)
+          </summary>
+          <p className='mt-1 mb-2 text-xs text-muted-foreground'>
+            สำหรับ admin: ให้ koharu รับงานจากเว็บไซต์อัตโนมัติ — poll คิว, แปล, ส่งกลับ
+            โดยไม่ต้องกดเอง ต้องใส่ Agent Token จาก server config
+          </p>
           <AgentPanel />
-        </div>
+        </details>
       </DialogContent>
     </Dialog>
   )
