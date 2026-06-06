@@ -3,7 +3,7 @@
 // workflow: device-flow login, chapter pool/claim, submit. Heavy ML + editing still
 // use koharu's own /api/v1. The website base URL is configurable; defaults to local dev.
 const WEBSITE_API =
-  (typeof process !== 'undefined' && process.env.NEXT_PUBLIC_WEBSITE_API) || 'http://127.0.0.1:3000'
+  (typeof process !== 'undefined' && process.env.NEXT_PUBLIC_WEBSITE_API) || 'https://manga-th.net'
 
 // --- token storage: koharu keyring route when available, else localStorage ---
 const TOKEN_KEY = 'website_token'
@@ -58,15 +58,18 @@ export const startDeviceLogin = (): Promise<DeviceCode> =>
   web('/api/auth/device/code', { method: 'POST' })
 
 // Returns the access token once approved, or null while still pending.
+// The website returns HTTP 400 with { error: "authorization_pending" } while waiting.
 export async function pollDeviceToken(deviceCode: string): Promise<string | null> {
   const res = await fetch(`${WEBSITE_API}/api/auth/device/token`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ device_code: deviceCode }),
   })
-  if (res.status === 428) return null // authorization_pending
   const body = await res.json()
-  if (!res.ok) throw new Error(body.error || 'login failed')
+  if (!res.ok) {
+    if (body.error === 'authorization_pending' || body.error === 'slow_down') return null
+    throw new Error(body.error || 'login failed')
+  }
   return body.access_token
 }
 
@@ -79,18 +82,29 @@ export type ChapterDetail = Chapter & {
   pages: { page_no: number; filename: string }[]
 }
 
-export const getMe = (t: string): Promise<Me> => web('/api/me', {}, t)
-export const listChapters = (t: string): Promise<Chapter[]> => web('/api/chapters', {}, t)
+// /api/me returns { displayName, credits, role } — map to our Me type
+export async function getMe(t: string): Promise<Me> {
+  const raw = await web('/api/me', {}, t)
+  return {
+    id: raw.id,
+    email: raw.email,
+    name: raw.displayName || raw.email,
+    isAdmin: raw.role === 'admin',
+    tokenBalance: raw.credits ?? 0,
+  }
+}
+export const listChapters = (t: string): Promise<Chapter[]> =>
+  web('/api/translator/chapters', {}, t)
 export const listMine = (t: string): Promise<(Chapter & { status: string })[]> =>
-  web('/api/chapters/mine', {}, t)
+  web('/api/translator/chapters/mine', {}, t)
 export const claimChapter = (id: string, t: string): Promise<any> =>
-  web(`/api/chapters/${id}/claim`, { method: 'POST' }, t)
+  web(`/api/translator/chapters/${id}/claim`, { method: 'POST' }, t)
 export const getChapter = (id: string, t: string): Promise<ChapterDetail> =>
-  web(`/api/chapters/${id}`, {}, t)
+  web(`/api/translator/chapters/${id}`, {}, t)
 
 // Fetch one raw (untranslated) source page as a Blob (authorized).
 export async function fetchRawPage(id: string, pageNo: number, t: string): Promise<Blob> {
-  const res = await fetch(`${WEBSITE_API}/api/chapters/${id}/pages/${pageNo}/raw`, {
+  const res = await fetch(`${WEBSITE_API}/api/translator/chapters/${id}/pages/${pageNo}/raw`, {
     headers: { authorization: `Bearer ${t}` },
   })
   if (!res.ok) throw new Error(`raw page ${pageNo}: ${res.status}`)
@@ -101,7 +115,7 @@ export async function fetchRawPage(id: string, pageNo: number, t: string): Promi
 export async function submitPages(id: string, pages: Blob[], t: string): Promise<any> {
   const fd = new FormData()
   pages.forEach((b, i) => fd.append('pages', b, `${i + 1}.png`))
-  const res = await fetch(`${WEBSITE_API}/api/chapters/${id}/submit`, {
+  const res = await fetch(`${WEBSITE_API}/api/translator/chapters/${id}/submit`, {
     method: 'POST',
     headers: { authorization: `Bearer ${t}` },
     body: fd,
