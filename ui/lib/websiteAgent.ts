@@ -118,7 +118,7 @@ async function agentFetch(
   return fetch(`${WEBSITE_API}${path}`, { ...init, headers })
 }
 
-async function waitForJob(jobId: string, timeoutMs = 600_000): Promise<void> {
+async function waitForJob(jobId: string, timeoutMs = 2_700_000): Promise<void> {
   const start = Date.now()
   while (Date.now() - start < timeoutMs) {
     if (_abortController?.signal.aborted) throw new Error('Agent stopped')
@@ -156,7 +156,18 @@ async function processOneJob(): Promise<boolean> {
   if (!claimRes.ok) {
     throw new Error(`Claim failed: ${claimRes.status} ${claimRes.statusText}`)
   }
-  const claim: ClaimResponse = await claimRes.json()
+  // Read as text first so a malformed/empty body produces a useful log instead
+  // of a bare "Unexpected end of JSON" — and so we can see WHAT came back.
+  const rawClaim = await claimRes.text()
+  let claim: ClaimResponse
+  try {
+    claim = JSON.parse(rawClaim)
+  } catch (e) {
+    appendLog(
+      `Claim response was not valid JSON (${rawClaim.length} bytes): ${rawClaim.slice(0, 300)}`,
+    )
+    throw new Error(`claim response not JSON: ${(e as Error).message}`)
+  }
   if (!claim.claimed) {
     appendLog(`No jobs available (${claim.reason}), waiting...`)
     return false
@@ -165,6 +176,11 @@ async function processOneJob(): Promise<boolean> {
   const { job, pages } = claim
   setState({ currentJob: job, status: 'downloading' })
   appendLog(`Claimed job ${job.id} (${pages.length} pages, ${job.sourceLanguage} -> ${job.targetLanguage})`)
+
+  // Heartbeat immediately (don't wait the full 30s interval): extends the lease
+  // right away and proves liveness, so a crash early in processing doesn't leave
+  // the job orphaned for the whole lease window.
+  await sendHeartbeat(job.id)
 
   // Start heartbeat interval
   const heartbeatTimer = setInterval(() => void sendHeartbeat(job.id), 30_000)

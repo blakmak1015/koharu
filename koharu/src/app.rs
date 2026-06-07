@@ -121,8 +121,46 @@ pub async fn run() -> Result<()> {
 
     if cli.headless {
         tracing::info!(port, "headless: open http://127.0.0.1:{port}/ in a browser");
-        bootstrap_app(state, config, cli.cpu).await?;
-        tokio::signal::ctrl_c().await?;
+        // Run a minimal Tauri app with NO window but a system-tray (notification
+        // area) icon, so the operator can see koharu is running in the background
+        // and quit it from the tray. The HTTP server was already spawned above.
+        tauri::Builder::default()
+            .setup(move |handle| {
+                tauri::async_runtime::spawn(async move {
+                    bootstrap_app(state, config, cli.cpu)
+                        .await
+                        .expect("failed to bootstrap app");
+                });
+
+                use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+                use tauri::tray::TrayIconBuilder;
+
+                let status = MenuItem::with_id(
+                    handle,
+                    "status",
+                    format!("koharu running — http://127.0.0.1:{port}"),
+                    false,
+                    None::<&str>,
+                )?;
+                let sep = PredefinedMenuItem::separator(handle)?;
+                let quit = MenuItem::with_id(handle, "quit", "Quit koharu", true, None::<&str>)?;
+                let menu = Menu::with_items(handle, &[&status, &sep, &quit])?;
+
+                let mut tray = TrayIconBuilder::with_id("koharu-headless")
+                    .tooltip(format!("koharu — translation agent running (port {port})"))
+                    .menu(&menu)
+                    .on_menu_event(|app, event| {
+                        if event.id.as_ref() == "quit" {
+                            app.exit(0);
+                        }
+                    });
+                if let Some(icon) = handle.default_window_icon().cloned() {
+                    tray = tray.icon(icon);
+                }
+                tray.build(handle)?;
+                Ok(())
+            })
+            .run(context)?;
         return Ok(());
     }
 
