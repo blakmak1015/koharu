@@ -411,7 +411,7 @@ export function WebsiteDialog({
   // Disarmed once a submit fully succeeds, so the close-guard won't fire then.
   const submittedRef = useRef(false)
 
-  // Auto-save the draft every 2 minutes while a job is active, so an idle-killed
+  // Auto-save the draft every 5 minutes while a job is active, so an idle-killed
   // or accidentally-closed editor resumes from near-latest text.
   useEffect(() => {
     if (!token || !activeJob) return
@@ -424,7 +424,7 @@ export function WebsiteDialog({
           /* best-effort auto-save */
         }
       })()
-    }, 120_000)
+    }, 300_000)
     return () => clearInterval(id)
   }, [token, activeJob])
 
