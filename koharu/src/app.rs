@@ -170,6 +170,15 @@ pub async fn run() -> Result<()> {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .on_window_event(|window, event| {
+            // Clicking X HIDES the window to the system tray instead of quitting,
+            // so the built-in Translation Agent keeps running in the background.
+            // Quit for real from the tray menu.
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let _ = window.hide();
+                api.prevent_close();
+            }
+        })
         .setup(move |handle| {
             tauri::async_runtime::spawn(async move {
                 bootstrap_app(state, config, cli.cpu)
@@ -197,6 +206,48 @@ pub async fn run() -> Result<()> {
             tauri::webview::WebviewWindowBuilder::from_config(handle, wc)?
                 .build()?
                 .navigate(url)?;
+
+            // Tray icon: restore a hidden (closed-to-tray) window, or quit for real.
+            {
+                use tauri::Manager;
+                use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+                use tauri::tray::{TrayIconBuilder, TrayIconEvent};
+                let show = MenuItem::with_id(handle, "show", "Show koharu", true, None::<&str>)?;
+                let sep = PredefinedMenuItem::separator(handle)?;
+                let quit = MenuItem::with_id(handle, "quit", "Quit koharu", true, None::<&str>)?;
+                let menu = Menu::with_items(handle, &[&show, &sep, &quit])?;
+                let mut tray = TrayIconBuilder::with_id("koharu-main")
+                    .tooltip("koharu — running (close window = hide to tray)")
+                    .menu(&menu)
+                    .show_menu_on_left_click(false)
+                    .on_menu_event(|app, event| match event.id.as_ref() {
+                        "show" => {
+                            if let Some(w) = app.get_webview_window("main") {
+                                let _ = w.show();
+                                let _ = w.set_focus();
+                            }
+                        }
+                        "quit" => app.exit(0),
+                        _ => {}
+                    })
+                    .on_tray_icon_event(|tray, event| {
+                        if let TrayIconEvent::Click {
+                            button: tauri::tray::MouseButton::Left,
+                            button_state: tauri::tray::MouseButtonState::Up,
+                            ..
+                        } = event
+                        {
+                            if let Some(w) = tray.app_handle().get_webview_window("main") {
+                                let _ = w.show();
+                                let _ = w.set_focus();
+                            }
+                        }
+                    });
+                if let Some(icon) = handle.default_window_icon().cloned() {
+                    tray = tray.icon(icon);
+                }
+                tray.build(handle)?;
+            }
 
             Ok(())
         })
