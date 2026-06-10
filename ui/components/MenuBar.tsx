@@ -19,7 +19,7 @@ import {
 } from '@/components/ui/menubar'
 import { useScene } from '@/hooks/useScene'
 import { getConfig, startPipeline } from '@/lib/api/default/default'
-import { isTauri, openExternalUrl } from '@/lib/backend'
+import { isTauri } from '@/lib/backend'
 import { exportCurrentProjectAs, importPages } from '@/lib/io/pagesIo'
 import { closeProject, redoOp, selectAllTextNodesOnCurrentPage, undoOp } from '@/lib/io/scene'
 import { formatShortcutForDisplay, getPlatform } from '@/lib/shortcutUtils'
@@ -241,14 +241,6 @@ export function MenuBar() {
     },
   ]
 
-  const helpMenuItems: MenuItem[] = [
-    { label: t('menu.discord'), onSelect: () => openExternalUrl('https://discord.gg/mHvHkxGnUY') },
-    {
-      label: t('menu.github'),
-      onSelect: () => openExternalUrl('https://github.com/mayocream/koharu'),
-    },
-  ]
-
   const isNativeMacOS = isTauri() && isMac
   const isWindowsTauri = isTauri() && !isMac
 
@@ -256,7 +248,7 @@ export function MenuBar() {
     <div className='flex h-8 items-center border-b border-border bg-background text-[13px] text-foreground'>
       {isNativeMacOS && <MacOSControls />}
       <div className='flex h-full items-center pl-2 select-none'>
-        <Image src='/icon.png' alt='Koharu' width={18} height={18} draggable={false} />
+        <Image src='/icon.png' alt='Manga-TH Translator' width={18} height={18} draggable={false} />
       </div>
       <Menubar className='h-auto gap-1 border-none bg-transparent p-0 px-1.5 shadow-none'>
         <MenubarMenu>
@@ -408,33 +400,6 @@ export function MenuBar() {
             </MenubarContent>
           </MenubarMenu>
         ))}
-        <MenubarMenu>
-          <MenubarTrigger className='rounded px-3 py-1.5 font-medium hover:bg-accent data-[state=open]:bg-accent'>
-            {t('menu.help')}
-          </MenubarTrigger>
-          <MenubarContent className='min-w-36' align='start' sideOffset={5} alignOffset={-3}>
-            {helpMenuItems.map((item) => (
-              <MenubarItem
-                key={item.label}
-                className='text-[13px]'
-                disabled={item.disabled}
-                onSelect={item.onSelect ? () => void item.onSelect?.() : undefined}
-              >
-                {item.label}
-              </MenubarItem>
-            ))}
-            <MenubarSeparator />
-            <MenubarItem
-              className='text-[13px]'
-              onSelect={() => {
-                setSettingsTab('about')
-                setSettingsOpen(true)
-              }}
-            >
-              {t('settings.about')}
-            </MenubarItem>
-          </MenubarContent>
-        </MenubarMenu>
       </Menubar>
       <div data-tauri-drag-region className='flex h-full flex-1 items-center justify-center' />
       {isWindowsTauri && <WindowControls />}
