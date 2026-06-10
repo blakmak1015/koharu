@@ -172,6 +172,37 @@ export const listEditable = (t: string): Promise<EditableChapter[]> =>
 export const getEditSource = (chapterId: string, t: string): Promise<EditSource> =>
   web(`/api/translator/chapters/${chapterId}/edit-source`, {}, t)
 
+// --- central glossary (PostgreSQL) -----------------------------------------
+// The series glossary is editable in koharu's GlossaryDialog; global+type come
+// down as a read-only context prompt. Edits sync back to the central store on
+// Submit so future auto-translation improves.
+export type WebGlossaryEntry = { source: string; target: string }
+
+export const resolveGlossary = (
+  contentId: string,
+  t: string,
+): Promise<{
+  seriesEntries: WebGlossaryEntry[]
+  seriesNotes: string
+  contextPrompt: string | null
+}> => web(`/api/glossary/resolve?contentId=${encodeURIComponent(contentId)}`, {}, t)
+
+export const pushSeriesGlossary = (
+  contentId: string,
+  entries: WebGlossaryEntry[],
+  notes: string,
+  t: string,
+): Promise<unknown> =>
+  web(
+    `/api/glossary/series/${encodeURIComponent(contentId)}`,
+    {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ entries, notes }),
+    },
+    t,
+  )
+
 // Create + claim an edit job for an already-published chapter. Returns the new
 // translation_job id used by the normal submit flow. 409 if a job is active.
 export async function reopenEdit(

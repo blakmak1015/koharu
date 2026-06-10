@@ -33,12 +33,21 @@ import {
   listChapters,
   listEditable,
   listMine,
+  pushSeriesGlossary,
   reopenEdit,
+  resolveGlossary,
   submitPages,
 } from '@/lib/website'
+import { useGlossaryStore } from '@/lib/stores/glossaryStore'
 
 const ACTIVE_JOB_KEY = 'website_active_job'
-type ActiveJob = { chapterId: string; title: string; pageIds: string[] }
+type ActiveJob = {
+  chapterId: string
+  title: string
+  pageIds: string[]
+  /** content_id of the series — used to sync the glossary back on submit. */
+  contentId?: string
+}
 
 function loadActiveJob(): ActiveJob | null {
   try {
@@ -115,6 +124,42 @@ async function exportRenderedBlobs(pageIds: string[]): Promise<Blob[]> {
     blobs.push(await res.blob())
   }
   return blobs
+}
+
+// Pull the central SERIES glossary into koharu's GlossaryDialog (active, editable)
+// and load global+type as the read-only context system prompt, so reviewing/
+// re-translating in the editor uses the same terminology as the auto-translate.
+async function syncGlossaryDown(
+  contentId: string,
+  token: string,
+  displayName: string,
+): Promise<void> {
+  try {
+    const g = await resolveGlossary(contentId, token)
+    const gid = `central:${contentId}`
+    useGlossaryStore.setState((s) => ({
+      glossaries: [
+        ...s.glossaries.filter((x) => x.id !== gid),
+        { id: gid, name: displayName || contentId, entries: g.seriesEntries, notes: g.seriesNotes },
+      ],
+      activeGlossaryId: gid,
+    }))
+    usePreferencesStore.getState().setCustomSystemPrompt(g.contextPrompt ?? undefined)
+  } catch (e) {
+    console.warn('glossary sync-down failed:', e)
+  }
+}
+
+// Push the (possibly edited) series glossary back to the central store on submit
+// so the next auto-translation of this series uses the corrected terms.
+async function syncGlossaryUp(contentId: string, token: string): Promise<void> {
+  try {
+    const gid = `central:${contentId}`
+    const g = useGlossaryStore.getState().glossaries.find((x) => x.id === gid)
+    if (g) await pushSeriesGlossary(contentId, g.entries, g.notes ?? '', token)
+  } catch (e) {
+    console.warn('glossary sync-up failed:', e)
+  }
 }
 
 export function WebsiteDialog({
@@ -212,6 +257,7 @@ export function WebsiteDialog({
         if (!src.editable || src.pages.length === 0) {
           throw new Error('This chapter has no inpainted pages to edit.')
         }
+        await syncGlossaryDown(c.contentId, token, c.seriesTitle)
         await createAndOpenProject({ name: `[EDIT] ${c.seriesTitle} Ch.${c.chapterNo}` })
         const files: File[] = []
         for (const p of src.pages) {
@@ -244,6 +290,7 @@ export function WebsiteDialog({
           chapterId: jobId,
           title: `[EDIT] ${c.seriesTitle} Ch.${c.chapterNo}`,
           pageIds,
+          contentId: c.contentId,
         }
         saveActiveJob(job)
         setActiveJob(job)
@@ -281,6 +328,7 @@ export function WebsiteDialog({
         if (!src.editable || src.pages.length === 0) {
           throw new Error('This job has no inpainted pages to review.')
         }
+        await syncGlossaryDown(src.contentId, token, name.replace(/^\[REVIEW\] /, ''))
         await createAndOpenProject({ name })
         const files: File[] = []
         for (const p of src.pages) {
@@ -309,7 +357,7 @@ export function WebsiteDialog({
         setMsg('Rendering translated text...')
         await renderAllPages(pageIds)
 
-        const job: ActiveJob = { chapterId: jobId, title: name, pageIds }
+        const job: ActiveJob = { chapterId: jobId, title: name, pageIds, contentId: src.contentId }
         saveActiveJob(job)
         setActiveJob(job)
         onOpenChange(false) // hand off to the editor
@@ -354,6 +402,8 @@ export function WebsiteDialog({
       setMsg('Exporting & submitting...')
       const blobs = await exportRenderedBlobs(activeJob.pageIds)
       const res = await submitPages(activeJob.chapterId, blobs, token)
+      // Push any glossary edits back to the central store (live for next translate).
+      if (activeJob.contentId) await syncGlossaryUp(activeJob.contentId, token)
       setMsg(`Submitted ${res.pageCount} page(s). Awaiting review.`)
       saveActiveJob(null)
       setActiveJob(null)

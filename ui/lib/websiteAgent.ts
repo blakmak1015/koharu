@@ -50,7 +50,15 @@ type AgentPage = {
 
 type ClaimResponse =
   | { success: true; claimed: false; reason: string; waitMs: number }
-  | { success: true; claimed: true; agentId: string; job: AgentJob; pages: AgentPage[] }
+  | {
+      success: true
+      claimed: true
+      agentId: string
+      job: AgentJob
+      pages: AgentPage[]
+      /** Resolved central glossary (global+type+series) as a koharu systemPrompt. */
+      systemPrompt?: string | null
+    }
 
 export type AgentStatus =
   | 'stopped'
@@ -401,11 +409,18 @@ async function processOneJob(): Promise<boolean> {
     if (steps.length === 0) throw new Error('No pipeline steps configured')
 
     const prefs = usePreferencesStore.getState()
+    // Central glossary resolved by the website for this content (global+type+
+    // series) and shipped with the claim. Sent as the per-request systemPrompt
+    // so the local LLM keeps names/terms consistent across the series.
+    if (claim.systemPrompt) {
+      appendLog(`Using central glossary (${claim.systemPrompt.length} chars)`)
+    }
     const { operationId } = await startPipeline({
       steps,
       pages: pageIds,
       targetLanguage: job.targetLanguage || undefined,
       defaultFont: prefs.defaultFont,
+      systemPrompt: claim.systemPrompt ?? undefined,
     })
     appendLog(`Pipeline started (operation: ${operationId}), waiting for completion...`)
 
