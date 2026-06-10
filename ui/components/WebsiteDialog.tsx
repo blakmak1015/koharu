@@ -235,6 +235,11 @@ export function WebsiteDialog({
             throw new Error(`Inject text nodes (page ${i + 1}) failed: ${res.status}`)
           }
         }
+        // Render so the injected text nodes get sprites and become visible in
+        // the editor (see onReviewTranslated note). Renderer-only — no re-translate.
+        setMsg('Rendering translated text...')
+        await renderAllPages(pageIds)
+
         const job: ActiveJob = {
           chapterId: jobId,
           title: `[EDIT] ${c.seriesTitle} Ch.${c.chapterNo}`,
@@ -297,6 +302,13 @@ export function WebsiteDialog({
             throw new Error(`Inject text nodes (page ${i + 1}) failed: ${res.status}`)
           }
         }
+        // Render so the injected text nodes get sprites and become visible in
+        // the editor (add_text_nodes only adds nodes; koharu draws the rendered
+        // sprite). steps:[renderer] only typesets — it won't re-translate, so
+        // our reconstructed text is preserved.
+        setMsg('Rendering translated text...')
+        await renderAllPages(pageIds)
+
         const job: ActiveJob = { chapterId: jobId, title: name, pageIds }
         saveActiveJob(job)
         setActiveJob(job)
