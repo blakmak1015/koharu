@@ -17,8 +17,8 @@ use axum::extract::{Multipart, Path, Query, State};
 use image::GenericImageView;
 use koharu_app::pipeline::{self, EngineCtx, PipelineRunOptions};
 use koharu_core::{
-    BlobRef, ImageData, ImageRole, MaskRole, Node, NodeDataPatch, NodeId, NodeKind, Op, Page,
-    PageId, ReadingOrder, Region, Scene, Transform,
+    BlobRef, FontPrediction, ImageData, ImageRole, MaskRole, Node, NodeDataPatch, NodeId, NodeKind,
+    Op, Page, PageId, ReadingOrder, Region, Scene, TextData, TextDirection, Transform,
 };
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -46,6 +46,160 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(add_image_layer))
         .routes(routes!(put_mask))
         .routes(routes!(reorder_text_nodes))
+        .routes(routes!(add_text_nodes))
+}
+
+// ---------------------------------------------------------------------------
+// POST /pages/{id}/text-nodes — inject translated text blocks into a page.
+//
+// Used by the website "edit published chapter" flow: the chapter is stored as
+// an inpainted (clean) image + proportional textBlocks JSON. To re-edit it in
+// koharu we rebuild the project from those parts — add the inpainted image as a
+// page (via POST /pages) and then call this to recreate the translated text
+// nodes at their saved positions/colours so an editor can fix typos/placement
+// and re-render. Coordinates are PROPORTIONAL (0..1) to the page, matching the
+// website's TextBlock format; we convert to pixels using the page dimensions.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TextNodeInput {
+    /// Proportional (0..1) box on the page.
+    pub x_rel: f32,
+    pub y_rel: f32,
+    pub w_rel: f32,
+    pub h_rel: f32,
+    #[serde(default)]
+    pub rotation_deg: f32,
+    /// Original (pre-translation) text, optional.
+    #[serde(default)]
+    pub text: Option<String>,
+    /// Translated text actually rendered.
+    pub translation: String,
+    /// Font size as a fraction of page width (the website's `fontSizeRel`).
+    #[serde(default)]
+    pub font_size_rel: Option<f32>,
+    /// Fill colour, hex "#rrggbb".
+    #[serde(default)]
+    pub color: Option<String>,
+    /// Stroke/outline colour, hex "#rrggbb".
+    #[serde(default)]
+    pub stroke_color: Option<String>,
+    /// "horizontal" | "vertical".
+    #[serde(default)]
+    pub direction: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AddTextNodesRequest {
+    pub blocks: Vec<TextNodeInput>,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AddTextNodesResponse {
+    pub nodes: Vec<NodeId>,
+}
+
+fn parse_hex_rgb(s: &str) -> Option<[u8; 3]> {
+    let h = s.trim().trim_start_matches('#');
+    if h.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&h[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&h[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&h[4..6], 16).ok()?;
+    Some([r, g, b])
+}
+
+#[utoipa::path(
+    post,
+    path = "/pages/{id}/text-nodes",
+    params(("id" = PageId, Path, description = "Page id")),
+    request_body = AddTextNodesRequest,
+    responses((status = 200, body = AddTextNodesResponse))
+)]
+async fn add_text_nodes(
+    State(app): State<AppState>,
+    Path(page_id): Path<PageId>,
+    Json(req): Json<AddTextNodesRequest>,
+) -> ApiResult<Json<AddTextNodesResponse>> {
+    let session = app
+        .current_session()
+        .ok_or_else(|| ApiError::bad_request("no project open"))?;
+    let (page_w, page_h, mut at) = {
+        let scene = session.scene.read();
+        let page = scene
+            .page(page_id)
+            .ok_or_else(|| ApiError::not_found(format!("page {page_id}")))?;
+        (page.width as f32, page.height as f32, page.nodes.len())
+    };
+
+    let mut node_ids = Vec::with_capacity(req.blocks.len());
+    for b in req.blocks {
+        let x = b.x_rel.clamp(0.0, 1.0) * page_w;
+        let y = b.y_rel.clamp(0.0, 1.0) * page_h;
+        let w = (b.w_rel.max(0.0) * page_w).max(1.0);
+        let h = (b.h_rel.max(0.0) * page_h).max(1.0);
+        let direction = match b.direction.as_deref() {
+            Some("vertical") => TextDirection::Vertical,
+            _ => TextDirection::Horizontal,
+        };
+        let font_px = b
+            .font_size_rel
+            .map(|r| (r * page_w).max(1.0))
+            .unwrap_or_else(|| w.min(h).max(1.0));
+        let text_color = b.color.as_deref().and_then(parse_hex_rgb).unwrap_or([0, 0, 0]);
+        let stroke_color = b
+            .stroke_color
+            .as_deref()
+            .and_then(parse_hex_rgb)
+            .unwrap_or([255, 255, 255]);
+
+        let text_data = TextData {
+            confidence: 1.0,
+            source_direction: Some(direction),
+            rendered_direction: Some(direction),
+            rotation_deg: Some(b.rotation_deg),
+            detected_font_size_px: Some(font_px),
+            detector: Some("website-editor".to_string()),
+            text: b.text.clone(),
+            translation: Some(b.translation.clone()),
+            font_prediction: Some(FontPrediction {
+                direction,
+                text_color,
+                stroke_color,
+                font_size_px: font_px,
+                line_height: 1.0,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let node = Node {
+            id: NodeId::new(),
+            transform: Transform {
+                x,
+                y,
+                width: w,
+                height: h,
+                rotation_deg: b.rotation_deg,
+            },
+            visible: true,
+            kind: NodeKind::Text(text_data),
+        };
+        let id = node.id;
+        app.apply(Op::AddNode {
+            page: page_id,
+            node,
+            at,
+        })
+        .map_err(ApiError::internal)?;
+        at += 1;
+        node_ids.push(id);
+    }
+
+    Ok(Json(AddTextNodesResponse { nodes: node_ids }))
 }
 
 // ---------------------------------------------------------------------------
