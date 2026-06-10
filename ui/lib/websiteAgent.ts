@@ -276,6 +276,47 @@ async function fetchSceneBlocks(koharuPageId: string): Promise<{ textBlocks: Tex
   }
 }
 
+// Make sure koharu has an LLM model loaded before translating. A freshly
+// (re)started koharu has no model selected; the `llm` step would then fail and
+// nothing renders. Idempotent — returns immediately if one is already ready.
+async function ensureLlmLoaded(): Promise<void> {
+  try {
+    const cur = await fetch('/api/v1/llm/current').then((r) => (r.ok ? r.json() : null)).catch(() => null)
+    if (cur && String(cur.status).toLowerCase() === 'ready' && cur.target) return
+    const cat = (await fetch('/api/v1/llm/catalog').then((r) => r.json())) as {
+      models?: { target: { providerId?: string } }[]
+      localModels?: { target: unknown }[]
+    }
+    const providerModels = cat.models ?? []
+    const pick = providerModels.find((m) => m.target.providerId === 'openai-compatible') ?? providerModels[0] ?? (cat.localModels ?? [])[0]
+    if (!pick) {
+      appendLog('No LLM model available to load')
+      return
+    }
+    appendLog('Loading LLM model...')
+    await fetch('/api/v1/llm/current', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ target: (pick as { target: unknown }).target }),
+    })
+    for (let i = 0; i < 60; i++) {
+      await new Promise((r) => setTimeout(r, 1000))
+      const s = await fetch('/api/v1/llm/current').then((r) => r.json()).catch(() => null)
+      const st = String(s?.status ?? '').toLowerCase()
+      if (st === 'ready') {
+        appendLog('LLM ready')
+        return
+      }
+      if (st === 'error') {
+        appendLog(`LLM load error: ${s?.error ?? 'unknown'}`)
+        return
+      }
+    }
+  } catch (e) {
+    appendLog(`ensureLlmLoaded failed: ${(e as Error).message}`)
+  }
+}
+
 // --- main loop --------------------------------------------------------------
 
 async function processOneJob(): Promise<boolean> {
@@ -340,6 +381,7 @@ async function processOneJob(): Promise<boolean> {
 
     // 4. Run full pipeline
     appendLog('Running full pipeline...')
+    await ensureLlmLoaded()
     await sendHeartbeat(job.id)
     const cfg = await getConfig()
     if (!cfg.pipeline) throw new Error('No pipeline configuration found')
