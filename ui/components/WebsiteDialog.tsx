@@ -24,11 +24,16 @@ import { useJobsStore } from '@/lib/stores/jobsStore'
 import { usePreferencesStore } from '@/lib/stores/preferencesStore'
 import {
   type Chapter,
+  type EditableChapter,
   claimChapter,
+  fetchImageBlob,
   fetchRawPage,
   getChapter,
+  getEditSource,
   listChapters,
+  listEditable,
   listMine,
+  reopenEdit,
   submitPages,
 } from '@/lib/website'
 
@@ -123,14 +128,20 @@ export function WebsiteDialog({
   const user = useAuthStore((s) => s.user)
   const [pool, setPool] = useState<Chapter[]>([])
   const [mine, setMine] = useState<(Chapter & { status: string })[]>([])
+  const [editable, setEditable] = useState<EditableChapter[]>([])
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<string | null>(null)
   const [activeJob, setActiveJob] = useState<ActiveJob | null>(null)
 
   const refresh = useCallback(async (t: string) => {
-    const [poolData, mineData] = await Promise.all([listChapters(t), listMine(t)])
+    const [poolData, mineData, editableData] = await Promise.all([
+      listChapters(t),
+      listMine(t),
+      listEditable(t).catch(() => [] as EditableChapter[]),
+    ])
     setPool(poolData)
     setMine(mineData)
+    setEditable(editableData)
   }, [])
 
   // On open, restore any saved active job + refresh chapter lists.
@@ -165,6 +176,68 @@ export function WebsiteDialog({
         const job: ActiveJob = {
           chapterId: c.id,
           title: `${c.seriesTitle} Ch.${c.chapterNo}`,
+          pageIds,
+        }
+        saveActiveJob(job)
+        setActiveJob(job)
+        onOpenChange(false) // hand off to the editor
+      } catch (e) {
+        setMsg(e instanceof Error ? e.message : String(e))
+      } finally {
+        setBusy(false)
+      }
+    },
+    [token, onOpenChange],
+  )
+
+  // Reopen an already-published chapter: rebuild an editable koharu project
+  // from its stored inpainted pages + translated text blocks, then hand off to
+  // the editor. Submit reuses the same flow as a normal translation.
+  const onEditPublished = useCallback(
+    async (c: EditableChapter) => {
+      if (!token) return
+      setBusy(true)
+      setMsg(`Reopening "${c.seriesTitle} Ch.${c.chapterNo}" for editing...`)
+      try {
+        const reopened = await reopenEdit(c.chapterId, token)
+        if (!reopened.success || !reopened.jobId) {
+          throw new Error(
+            reopened.reason === 'active_job_exists'
+              ? 'This chapter already has an active job in the queue.'
+              : reopened.reason || 'Could not reopen chapter for editing.',
+          )
+        }
+        const jobId = reopened.jobId
+        const src = await getEditSource(c.chapterId, token)
+        if (!src.editable || src.pages.length === 0) {
+          throw new Error('This chapter has no inpainted pages to edit.')
+        }
+        await createAndOpenProject({ name: `[EDIT] ${c.seriesTitle} Ch.${c.chapterNo}` })
+        const files: File[] = []
+        for (const p of src.pages) {
+          const blob = await fetchImageBlob(p.inpaintedImageUrl)
+          files.push(
+            new File([blob], `${p.pageNumber}.png`, { type: blob.type || 'image/png' }),
+          )
+        }
+        const pageIds = await uploadPages(files, true)
+        // Re-create the translated text nodes at their saved positions/colours
+        // so the editor sees the existing translation to fix.
+        for (let i = 0; i < pageIds.length; i++) {
+          const blocks = src.pages[i]?.blocks ?? []
+          if (!blocks.length) continue
+          const res = await fetch(`/api/v1/pages/${pageIds[i]}/text-nodes`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ blocks }),
+          })
+          if (!res.ok) {
+            throw new Error(`Inject text nodes (page ${i + 1}) failed: ${res.status}`)
+          }
+        }
+        const job: ActiveJob = {
+          chapterId: jobId,
+          title: `[EDIT] ${c.seriesTitle} Ch.${c.chapterNo}`,
           pageIds,
         }
         saveActiveJob(job)
@@ -243,6 +316,30 @@ export function WebsiteDialog({
                     </span>
                     <Button size='sm' disabled={busy} onClick={() => onClaim(c)}>
                       Claim
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            </ScrollArea>
+          </div>
+
+          <div>
+            <h3 className='mb-1 text-sm font-medium'>Edit published</h3>
+            <ScrollArea className='h-40 rounded border'>
+              <div className='space-y-1 p-2'>
+                {editable.length === 0 && (
+                  <p className='text-sm text-muted-foreground'>None.</p>
+                )}
+                {editable.map((c) => (
+                  <div
+                    key={c.chapterId}
+                    className='flex items-center justify-between rounded px-2 py-1'
+                  >
+                    <span className='text-sm'>
+                      {c.seriesTitle} — Ch.{c.chapterNo}
+                    </span>
+                    <Button size='sm' disabled={busy} onClick={() => onEditPublished(c)}>
+                      Edit
                     </Button>
                   </div>
                 ))}

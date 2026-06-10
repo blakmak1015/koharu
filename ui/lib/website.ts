@@ -130,4 +130,71 @@ export async function submitPages(id: string, pages: Blob[], t: string): Promise
   return body
 }
 
+// --- edit already-published chapters (fix typos / text placement) ----------
+export type EditableChapter = {
+  chapterId: string
+  contentId: string
+  seriesTitle: string
+  chapterNo: string
+}
+export type EditSourceBlock = {
+  xRel: number
+  yRel: number
+  wRel: number
+  hRel: number
+  rotationDeg: number
+  translation: string
+  fontSizeRel: number | null
+  color: string | null
+  strokeColor: string | null
+  direction: string
+}
+export type EditSourcePage = {
+  pageNumber: number
+  inpaintedImageUrl: string
+  imageUrl: string | null
+  pageWidth: number | null
+  pageHeight: number | null
+  blocks: EditSourceBlock[]
+}
+export type EditSource = {
+  chapterId: string
+  contentId: string
+  editable: boolean
+  pages: EditSourcePage[]
+}
+
+// Published manga chapters that can be re-opened in the editor.
+export const listEditable = (t: string): Promise<EditableChapter[]> =>
+  web('/api/translator/chapters/editable', {}, t)
+
+// Reconstruction data (clean pages + translated blocks) for one chapter.
+export const getEditSource = (chapterId: string, t: string): Promise<EditSource> =>
+  web(`/api/translator/chapters/${chapterId}/edit-source`, {}, t)
+
+// Create + claim an edit job for an already-published chapter. Returns the new
+// translation_job id used by the normal submit flow. 409 if a job is active.
+export async function reopenEdit(
+  chapterId: string,
+  t: string,
+): Promise<{ success: boolean; jobId?: string; reason?: string; status?: string }> {
+  const res = await fetch(`${WEBSITE_API}/api/translator/chapters/${chapterId}/reopen-edit`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${t}` },
+  })
+  return (await res.json().catch(() => ({}))) as {
+    success: boolean
+    jobId?: string
+    reason?: string
+    status?: string
+  }
+}
+
+// Fetch a CDN image URL as a Blob for re-import into koharu.
+export async function fetchImageBlob(url: string): Promise<Blob> {
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(`fetch image ${res.status}`)
+  return res.blob()
+}
+
 export { WEBSITE_API }
