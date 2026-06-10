@@ -144,6 +144,138 @@ async function sendHeartbeat(jobId: string): Promise<void> {
   }
 }
 
+// --- watermark + SEO overlay (parity with the standalone Node agent) --------
+
+type TextBlock = {
+  x: number
+  y: number
+  w: number
+  h: number
+  rotationDeg: number
+  text: string
+  fontSizeRel: number
+  color?: string
+  strokeColor?: string
+  direction?: 'horizontal' | 'vertical'
+}
+
+const clamp01 = (n: number) => Math.min(1, Math.max(0, n))
+const toHex = (rgb: number[] | undefined): string => {
+  const c = rgb && rgb.length >= 3 ? rgb : [0, 0, 0]
+  return '#' + c.slice(0, 3).map((n) => Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2, '0')).join('')
+}
+const contrastingStroke = (rgb: number[] | undefined): string => {
+  const c = rgb && rgb.length >= 3 ? rgb : [0, 0, 0]
+  return 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2] > 128 ? '#000000' : '#ffffff'
+}
+
+// Bake a faint "manga-th.net" mark into the top-right of a rendered page (plain
+// grey, no outline) using the canvas — runs in the koharu webview. Never blocks
+// the upload: returns the original blob on any failure.
+async function brandBlob(blob: Blob): Promise<Blob> {
+  try {
+    const bmp = await createImageBitmap(blob)
+    const W = bmp.width
+    const H = bmp.height
+    const canvas = document.createElement('canvas')
+    canvas.width = W
+    canvas.height = H
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return blob
+    ctx.drawImage(bmp, 0, 0)
+    const fontPx = Math.max(22, Math.round(W * 0.045))
+    ctx.font = `${fontPx}px sans-serif`
+    ctx.textBaseline = 'top'
+    const text = 'manga-th.net'
+    const tw = ctx.measureText(text).width
+    const margin = Math.round(W * 0.02)
+    ctx.fillStyle = 'rgba(110,110,110,0.5)'
+    ctx.fillText(text, W - tw - margin, Math.round(H * 0.05))
+    return await new Promise<Blob>((resolve) => canvas.toBlob((b) => resolve(b ?? blob), 'image/png'))
+  } catch {
+    return blob
+  }
+}
+
+// Upload one page image; returns its public URL. Optional fileName lets us store
+// the clean (inpainted) image alongside the rendered one without overwriting.
+async function uploadPage(jobId: string, pageNumber: number, blob: Blob, fileName?: string): Promise<string> {
+  const qs = new URLSearchParams({ jobId, pageNumber: String(pageNumber) })
+  if (fileName) qs.set('fileName', fileName)
+  const res = await agentFetch(`/api/admin/translation/agent/upload?${qs.toString()}`, {
+    method: 'POST',
+    headers: { 'content-type': blob.type || 'image/png' },
+    body: await blob.arrayBuffer(),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(`Upload page ${pageNumber} failed: ${(err as { error?: string }).error || res.statusText}`)
+  }
+  const data = (await res.json()) as { uploaded: { url: string } }
+  return data.uploaded.url
+}
+
+// Extract translated text blocks for one koharu page as PROPORTIONAL (0-1) boxes
+// from the live scene, so the web reader can overlay them as HTML text (SEO).
+async function fetchSceneBlocks(koharuPageId: string): Promise<{ textBlocks: TextBlock[]; width: number; height: number }> {
+  type BoxT = { x?: number; y?: number; width?: number; height?: number; rotationDeg?: number }
+  try {
+    const res = await fetch('/api/v1/scene.json')
+    if (!res.ok) return { textBlocks: [], width: 0, height: 0 }
+    const scene = (await res.json()) as { scene?: { pages?: Record<string, unknown> } }
+    const page = scene?.scene?.pages?.[koharuPageId] as
+      | { width?: number; height?: number; nodes?: Record<string, unknown> }
+      | undefined
+    if (!page) return { textBlocks: [], width: 0, height: 0 }
+    const width = Number(page.width) || 0
+    const height = Number(page.height) || 0
+    const blocks: TextBlock[] = []
+    if (width > 0 && height > 0 && page.nodes) {
+      for (const raw of Object.values(page.nodes)) {
+        const node = raw as {
+          visible?: boolean
+          transform?: BoxT
+          kind?: {
+            text?: {
+              translation?: string
+              detectedFontSizePx?: number
+              rotationDeg?: number
+              renderedDirection?: string
+              spriteTransform?: BoxT
+              fontPrediction?: { textColor?: number[] }
+            }
+          }
+        }
+        const t = node?.kind?.text
+        if (!t || node.visible === false) continue
+        const text = String(t.translation ?? '').trim()
+        if (!text) continue
+        const box: BoxT = t.spriteTransform && Number(t.spriteTransform.width) > 0 ? t.spriteTransform : (node.transform ?? {})
+        const w = Number(box.width) || 0
+        const h = Number(box.height) || 0
+        if (w <= 0 || h <= 0) continue
+        const fontPx = Number(t.detectedFontSizePx) || 0
+        const textColor = t.fontPrediction?.textColor
+        blocks.push({
+          x: clamp01((Number(box.x) || 0) / width),
+          y: clamp01((Number(box.y) || 0) / height),
+          w: clamp01(w / width),
+          h: clamp01(h / height),
+          rotationDeg: Number(box.rotationDeg ?? t.rotationDeg ?? 0) || 0,
+          text,
+          fontSizeRel: fontPx > 0 ? fontPx / width : 0,
+          color: toHex(textColor),
+          strokeColor: contrastingStroke(textColor),
+          direction: t.renderedDirection === 'vertical' ? 'vertical' : 'horizontal',
+        })
+      }
+    }
+    return { textBlocks: blocks, width, height }
+  } catch {
+    return { textBlocks: [], width: 0, height: 0 }
+  }
+}
+
 // --- main loop --------------------------------------------------------------
 
 async function processOneJob(): Promise<boolean> {
@@ -249,35 +381,58 @@ async function processOneJob(): Promise<boolean> {
     appendLog('Exporting rendered pages...')
     await sendHeartbeat(job.id)
 
-    const uploadedPages: { pageNumber: number; translatedImageUrl: string }[] = []
+    type CompletePage = {
+      pageNumber: number
+      translatedImageUrl: string
+      inpaintedImageUrl?: string
+      textBlocks?: TextBlock[]
+      pageWidth?: number
+      pageHeight?: number
+    }
+    const uploadedPages: CompletePage[] = []
     for (let i = 0; i < pageIds.length; i++) {
       if (_abortController?.signal.aborted) throw new Error('Agent stopped')
       const pageId = pageIds[i]
       const pageNumber = pages[i]?.pageNumber ?? i + 1
 
-      // Export single rendered page
-      const { blob } = await exportProject({
+      // Rendered page -> bake watermark -> upload.
+      const { blob: renderedRaw } = await exportProject({
         format: 'rendered',
         pages: [pageId],
         defaultFont: prefs.defaultFont,
       })
-
-      // Upload to website
-      const uploadRes = await agentFetch(
-        `/api/admin/translation/agent/upload?jobId=${encodeURIComponent(job.id)}&pageNumber=${pageNumber}`,
-        {
-          method: 'POST',
-          headers: { 'content-type': blob.type || 'image/png' },
-          body: await blob.arrayBuffer(),
-        },
-      )
-      if (!uploadRes.ok) {
-        const err = await uploadRes.json().catch(() => ({}))
-        throw new Error(`Upload page ${pageNumber} failed: ${(err as { error?: string }).error || uploadRes.statusText}`)
+      const rendered = await brandBlob(renderedRaw)
+      const entry: CompletePage = {
+        pageNumber,
+        translatedImageUrl: await uploadPage(job.id, pageNumber, rendered),
       }
-      const uploadData = (await uploadRes.json()) as { uploaded: { url: string } }
-      uploadedPages.push({ pageNumber, translatedImageUrl: uploadData.uploaded.url })
-      appendLog(`Uploaded page ${pageNumber}/${pageIds.length}`)
+
+      // Clean (inpainted) image + translated text blocks for the SEO/HTML
+      // overlay reader. Best-effort: the rendered raster above is unaffected.
+      try {
+        const { blob: clean } = await exportProject({
+          format: 'inpainted',
+          pages: [pageId],
+          defaultFont: prefs.defaultFont,
+        })
+        entry.inpaintedImageUrl = await uploadPage(
+          job.id,
+          pageNumber,
+          clean,
+          `${String(pageNumber).padStart(3, '0')}-clean.png`,
+        )
+      } catch (e) {
+        appendLog(`inpaint export page ${pageNumber} skipped: ${(e as Error).message}`)
+      }
+      const { textBlocks, width, height } = await fetchSceneBlocks(pageId)
+      if (textBlocks.length) {
+        entry.textBlocks = textBlocks
+        entry.pageWidth = width
+        entry.pageHeight = height
+      }
+
+      uploadedPages.push(entry)
+      appendLog(`Uploaded page ${pageNumber}/${pageIds.length}${entry.textBlocks ? ` (+${entry.textBlocks.length} blocks +clean)` : ''}`)
     }
 
     // 6. Complete
