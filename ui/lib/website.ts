@@ -187,6 +187,33 @@ export const resolveGlossary = (
   contextPrompt: string | null
 }> => web(`/api/glossary/resolve?contentId=${encodeURIComponent(contentId)}`, {}, t)
 
+// --- central glossary admin (two-way sync with the web /admin/glossary) ------
+export type CentralGlossary = {
+  scopeType: 'global' | 'content_type' | 'series'
+  scopeValue: string
+  entries: WebGlossaryEntry[]
+  notes: string
+  title?: string
+}
+export const listGlossaries = (t: string): Promise<{ items: CentralGlossary[] }> =>
+  web('/api/admin/glossary', {}, t)
+export const saveGlossaryScope = (
+  scopeType: string,
+  scopeValue: string,
+  entries: WebGlossaryEntry[],
+  notes: string,
+  t: string,
+): Promise<unknown> =>
+  web(
+    '/api/admin/glossary',
+    {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ scopeType, scopeValue, entries, notes }),
+    },
+    t,
+  )
+
 // Save the editor's in-progress text blocks as a draft (resume later / survive
 // idle-kill). pages: [{ pageNumber, textBlocks, pageWidth, pageHeight }].
 export const saveDraft = (
