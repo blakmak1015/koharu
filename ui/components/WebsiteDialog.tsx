@@ -5,7 +5,7 @@
 // project for editing) and submit the finished translation back.
 // Now mounted at root level via AuthGate — accessible from both WelcomeScreen
 // and MenuBar.
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
@@ -252,6 +252,84 @@ export function WebsiteDialog({
     [token, onOpenChange],
   )
 
+  // Review an AUTO-TRANSLATED job (status 'editing', already claimed for us by
+  // the website via /dashboard/translate). Unlike onEditPublished we do NOT call
+  // reopenEdit — the translation_job already exists; we just reconstruct its
+  // result (inpainted pages + translated text blocks) so the editor can fix it,
+  // then Submit uses the SAME jobId. Triggered by the ?review=<jobId>&ch=<chapterId>
+  // URL params the gateway forwards on hand-off (see the effect below).
+  const onReviewTranslated = useCallback(
+    async (jobId: string, chapterId: string) => {
+      if (!token) return
+      setBusy(true)
+      setMsg('Loading translation for review...')
+      try {
+        // A friendly project name (job is already in my 'editing' list).
+        let name = `[REVIEW] ${chapterId.slice(0, 8)}`
+        try {
+          const mineNow = await listMine(token)
+          const m = mineNow.find((x) => x.id === jobId)
+          if (m) name = `[REVIEW] ${m.seriesTitle} Ch.${m.chapterNo}`
+        } catch {}
+
+        const src = await getEditSource(chapterId, token)
+        if (!src.editable || src.pages.length === 0) {
+          throw new Error('This job has no inpainted pages to review.')
+        }
+        await createAndOpenProject({ name })
+        const files: File[] = []
+        for (const p of src.pages) {
+          const blob = await fetchImageBlob(p.inpaintedImageUrl)
+          files.push(
+            new File([blob], `${p.pageNumber}.png`, { type: blob.type || 'image/png' }),
+          )
+        }
+        const pageIds = await uploadPages(files, true)
+        for (let i = 0; i < pageIds.length; i++) {
+          const blocks = src.pages[i]?.blocks ?? []
+          if (!blocks.length) continue
+          const res = await fetch(`/api/v1/pages/${pageIds[i]}/text-nodes`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ blocks }),
+          })
+          if (!res.ok) {
+            throw new Error(`Inject text nodes (page ${i + 1}) failed: ${res.status}`)
+          }
+        }
+        const job: ActiveJob = { chapterId: jobId, title: name, pageIds }
+        saveActiveJob(job)
+        setActiveJob(job)
+        onOpenChange(false) // hand off to the editor
+      } catch (e) {
+        setMsg(e instanceof Error ? e.message : String(e))
+      } finally {
+        setBusy(false)
+      }
+    },
+    [token, onOpenChange],
+  )
+
+  // Hand-off entry point: when the website opens us with ?review=<jobId>&ch=<chapterId>
+  // (forwarded by the editor gateway), auto-reconstruct that job for review. Run
+  // once, as soon as a token is available; strip the params so a refresh won't
+  // re-trigger.
+  const reviewHandled = useRef(false)
+  useEffect(() => {
+    if (!token || reviewHandled.current) return
+    const params = new URLSearchParams(window.location.search)
+    const jobId = params.get('review')
+    const chapterId = params.get('ch')
+    if (!jobId || !chapterId) return
+    reviewHandled.current = true
+    params.delete('review')
+    params.delete('ch')
+    const clean =
+      window.location.pathname + (params.toString() ? `?${params}` : '')
+    window.history.replaceState({}, '', clean)
+    void onReviewTranslated(jobId, chapterId)
+  }, [token, onReviewTranslated])
+
   const onSubmit = useCallback(async () => {
     if (!token || !activeJob) return
     setBusy(true)
@@ -303,24 +381,15 @@ export function WebsiteDialog({
             </Card>
           )}
 
-          <div>
-            <h3 className='mb-1 text-sm font-medium'>Available chapters</h3>
-            <ScrollArea className='h-48 rounded border'>
-              <div className='space-y-1 p-2'>
-                {pool.length === 0 && <p className='text-sm text-muted-foreground'>None.</p>}
-                {pool.map((c) => (
-                  <div key={c.id} className='flex items-center justify-between rounded px-2 py-1'>
-                    <span className='text-sm'>
-                      {c.seriesTitle} — Ch.{c.chapterNo}{' '}
-                      <span className='text-muted-foreground'>({c.rewardTokens} tokens)</span>
-                    </span>
-                    <Button size='sm' disabled={busy} onClick={() => onClaim(c)}>
-                      Claim
-                    </Button>
-                  </div>
-                ))}
-              </div>
-            </ScrollArea>
+          {/* "Available chapters" claiming now happens on the website
+              (/dashboard/translate) which reconstructs the auto-translated
+              result for review and hands off here via ?review=&ch=. Claiming
+              raw from inside koharu is intentionally disabled to keep a single
+              entry path. ({pool.length} job(s) waiting on the site.) */}
+          <div className='rounded border border-dashed p-3 text-sm text-muted-foreground'>
+            งานรอตรวจ ({pool.length}) — เปิดจากหน้าเว็บ{' '}
+            <strong>manga-th.net/dashboard/translate</strong> แล้วกด &quot;เริ่มตรวจ&quot;
+            ระบบจะดึงงานเข้ามาให้แก้ที่นี่อัตโนมัติ
           </div>
 
           <div>
