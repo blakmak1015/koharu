@@ -206,9 +206,15 @@ pub async fn run() -> Result<()> {
                 .iter()
                 .find(|w| w.label == "main")
                 .expect("main window config not found");
-            tauri::webview::WebviewWindowBuilder::from_config(handle, wc)?
-                .build()?
-                .navigate(url)?;
+            let main_window = tauri::webview::WebviewWindowBuilder::from_config(handle, wc)?
+                .build()?;
+            main_window.navigate(url)?;
+            // Start hidden in the tray when launched as a background startup app
+            // (KOHARU_TRAY_START=1). The webview still loads, so the auto-started
+            // agent keeps running; the operator restores the window from the tray.
+            if std::env::var("KOHARU_TRAY_START").map(|v| v == "1").unwrap_or(false) {
+                let _ = main_window.hide();
+            }
 
             // Tray icon: restore a hidden (closed-to-tray) window, or quit for real.
             {
