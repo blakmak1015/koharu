@@ -58,6 +58,8 @@ type ClaimResponse =
       pages: AgentPage[]
       /** Resolved central glossary (global+type+series) as a koharu systemPrompt. */
       systemPrompt?: string | null
+      /** Page numbers already translated (resume: agent skips these). */
+      donePageNumbers?: number[]
     }
 
 export type AgentStatus =
@@ -161,6 +163,8 @@ type TextBlock = {
   h: number
   rotationDeg: number
   text: string
+  /** Original OCR source text (for editor comparison). */
+  sourceText?: string
   fontSizeRel: number
   color?: string
   strokeColor?: string
@@ -225,7 +229,7 @@ async function uploadPage(jobId: string, pageNumber: number, blob: Blob, fileNam
 
 // Extract translated text blocks for one koharu page as PROPORTIONAL (0-1) boxes
 // from the live scene, so the web reader can overlay them as HTML text (SEO).
-async function fetchSceneBlocks(koharuPageId: string): Promise<{ textBlocks: TextBlock[]; width: number; height: number }> {
+export async function fetchSceneBlocks(koharuPageId: string): Promise<{ textBlocks: TextBlock[]; width: number; height: number }> {
   type BoxT = { x?: number; y?: number; width?: number; height?: number; rotationDeg?: number }
   try {
     const res = await fetch('/api/v1/scene.json')
@@ -245,6 +249,7 @@ async function fetchSceneBlocks(koharuPageId: string): Promise<{ textBlocks: Tex
           transform?: BoxT
           kind?: {
             text?: {
+              text?: string
               translation?: string
               detectedFontSizePx?: number
               rotationDeg?: number
@@ -258,6 +263,7 @@ async function fetchSceneBlocks(koharuPageId: string): Promise<{ textBlocks: Tex
         if (!t || node.visible === false) continue
         const text = String(t.translation ?? '').trim()
         if (!text) continue
+        const sourceText = String(t.text ?? '').trim()
         const box: BoxT = t.spriteTransform && Number(t.spriteTransform.width) > 0 ? t.spriteTransform : (node.transform ?? {})
         const w = Number(box.width) || 0
         const h = Number(box.height) || 0
@@ -271,6 +277,7 @@ async function fetchSceneBlocks(koharuPageId: string): Promise<{ textBlocks: Tex
           h: clamp01(h / height),
           rotationDeg: Number(box.rotationDeg ?? t.rotationDeg ?? 0) || 0,
           text,
+          ...(sourceText ? { sourceText } : {}),
           fontSizeRel: fontPx > 0 ? fontPx / width : 0,
           color: toHex(textColor),
           strokeColor: contrastingStroke(textColor),
@@ -367,10 +374,16 @@ async function processOneJob(): Promise<boolean> {
   const heartbeatTimer = setInterval(() => void sendHeartbeat(job.id), 30_000)
 
   try {
-    // 2. Download source pages
+    // 2. Skip pages already translated in a prior (interrupted) run; download
+    //    only the remaining source pages so we RESUME instead of redoing all.
+    const donePages = new Set(claim.donePageNumbers ?? [])
+    const remaining = pages.filter((pg) => !donePages.has(pg.pageNumber))
+    if (donePages.size) {
+      appendLog(`Resuming: ${donePages.size} page(s) already done, ${remaining.length} remaining`)
+    }
     appendLog('Downloading source pages...')
     const files: File[] = []
-    for (const page of pages) {
+    for (const page of remaining) {
       if (_abortController?.signal.aborted) throw new Error('Agent stopped')
       const url = page.imageUrl.startsWith('http') ? page.imageUrl : `${WEBSITE_API}${page.imageUrl}`
       const res = await fetch(url)
@@ -378,65 +391,7 @@ async function processOneJob(): Promise<boolean> {
       const blob = await res.blob()
       files.push(new File([blob], `${page.pageNumber}.png`, { type: blob.type || 'image/png' }))
     }
-    appendLog(`Downloaded ${files.length} pages`)
-
-    // 3. Create project & upload pages
-    setState({ status: 'processing' })
-    appendLog('Creating koharu project...')
-    await createAndOpenProject({ name: `agent-${job.id.slice(0, 8)}` })
-    const pageIds = await uploadPages(files, true)
-    appendLog(`Uploaded ${pageIds.length} pages to koharu project`)
-
-    // 4. Run full pipeline
-    appendLog('Running full pipeline...')
-    await ensureLlmLoaded()
-    await sendHeartbeat(job.id)
-    const cfg = await getConfig()
-    if (!cfg.pipeline) throw new Error('No pipeline configuration found')
-
-    const p = cfg.pipeline
-    const steps = [
-      p.detector,
-      p.segmenter,
-      p.bubble_segmenter,
-      p.font_detector,
-      p.ocr,
-      p.translator,
-      p.inpainter,
-      p.renderer,
-    ].filter((s): s is string => !!s)
-
-    if (steps.length === 0) throw new Error('No pipeline steps configured')
-
-    const prefs = usePreferencesStore.getState()
-    // Central glossary resolved by the website for this content (global+type+
-    // series) and shipped with the claim. Sent as the per-request systemPrompt
-    // so the local LLM keeps names/terms consistent across the series.
-    if (claim.systemPrompt) {
-      appendLog(`Using central glossary (${claim.systemPrompt.length} chars)`)
-    }
-    const { operationId } = await startPipeline({
-      steps,
-      pages: pageIds,
-      targetLanguage: job.targetLanguage || undefined,
-      defaultFont: prefs.defaultFont,
-      systemPrompt: claim.systemPrompt ?? undefined,
-    })
-    appendLog(`Pipeline started (operation: ${operationId}), waiting for completion...`)
-
-    // Periodically heartbeat while pipeline runs
-    const pipelineHeartbeat = setInterval(() => void sendHeartbeat(job.id), 30_000)
-    try {
-      await waitForJob(operationId)
-    } finally {
-      clearInterval(pipelineHeartbeat)
-    }
-    appendLog('Pipeline completed successfully')
-
-    // 5. Export rendered pages
-    setState({ status: 'uploading' })
-    appendLog('Exporting rendered pages...')
-    await sendHeartbeat(job.id)
+    appendLog(`Downloaded ${files.length} page(s)`)
 
     type CompletePage = {
       pageNumber: number
@@ -447,49 +402,96 @@ async function processOneJob(): Promise<boolean> {
       pageHeight?: number
     }
     const uploadedPages: CompletePage[] = []
-    for (let i = 0; i < pageIds.length; i++) {
-      if (_abortController?.signal.aborted) throw new Error('Agent stopped')
-      const pageId = pageIds[i]
-      const pageNumber = pages[i]?.pageNumber ?? i + 1
+    const prefs = usePreferencesStore.getState()
 
-      // Rendered page -> bake watermark -> upload.
-      const { blob: renderedRaw } = await exportProject({
-        format: 'rendered',
-        pages: [pageId],
-        defaultFont: prefs.defaultFont,
-      })
-      const rendered = await brandBlob(renderedRaw)
-      const entry: CompletePage = {
-        pageNumber,
-        translatedImageUrl: await uploadPage(job.id, pageNumber, rendered),
+    if (remaining.length > 0) {
+      // 3. Create project & upload the remaining source pages
+      setState({ status: 'processing' })
+      appendLog('Creating koharu project...')
+      await createAndOpenProject({ name: `agent-${job.id.slice(0, 8)}` })
+      const pageIds = await uploadPages(files, true)
+
+      // 4. Pipeline config
+      await ensureLlmLoaded()
+      await sendHeartbeat(job.id)
+      const cfg = await getConfig()
+      if (!cfg.pipeline) throw new Error('No pipeline configuration found')
+      const p = cfg.pipeline
+      const steps = [
+        p.detector,
+        p.segmenter,
+        p.bubble_segmenter,
+        p.font_detector,
+        p.ocr,
+        p.translator,
+        p.inpainter,
+        p.renderer,
+      ].filter((s): s is string => !!s)
+      if (steps.length === 0) throw new Error('No pipeline steps configured')
+      if (claim.systemPrompt) {
+        appendLog(`Using central glossary (${claim.systemPrompt.length} chars)`)
       }
 
-      // Clean (inpainted) image + translated text blocks for the SEO/HTML
-      // overlay reader. Best-effort: the rendered raster above is unaffected.
-      try {
-        const { blob: clean } = await exportProject({
-          format: 'inpainted',
+      // 5. Process ONE PAGE AT A TIME: pipeline a single page, then export +
+      //    upload it immediately. Each uploaded page is persisted server-side,
+      //    so a crash/close/restart resumes from the next page instead of
+      //    redoing the whole chapter.
+      setState({ status: 'processing' })
+      for (let i = 0; i < pageIds.length; i++) {
+        if (_abortController?.signal.aborted) throw new Error('Agent stopped')
+        const pageId = pageIds[i]
+        const pageNumber = remaining[i]?.pageNumber ?? i + 1
+        appendLog(`Translating page ${pageNumber} (${i + 1}/${remaining.length})...`)
+        const { operationId } = await startPipeline({
+          steps,
+          pages: [pageId],
+          targetLanguage: job.targetLanguage || undefined,
+          defaultFont: prefs.defaultFont,
+          systemPrompt: claim.systemPrompt ?? undefined,
+        })
+        await waitForJob(operationId)
+        await sendHeartbeat(job.id)
+
+        // Rendered page -> bake watermark -> upload.
+        const { blob: renderedRaw } = await exportProject({
+          format: 'rendered',
           pages: [pageId],
           defaultFont: prefs.defaultFont,
         })
-        entry.inpaintedImageUrl = await uploadPage(
-          job.id,
+        const rendered = await brandBlob(renderedRaw)
+        const entry: CompletePage = {
           pageNumber,
-          clean,
-          `${String(pageNumber).padStart(3, '0')}-clean.png`,
-        )
-      } catch (e) {
-        appendLog(`inpaint export page ${pageNumber} skipped: ${(e as Error).message}`)
-      }
-      const { textBlocks, width, height } = await fetchSceneBlocks(pageId)
-      if (textBlocks.length) {
-        entry.textBlocks = textBlocks
-        entry.pageWidth = width
-        entry.pageHeight = height
-      }
+          translatedImageUrl: await uploadPage(job.id, pageNumber, rendered),
+        }
 
-      uploadedPages.push(entry)
-      appendLog(`Uploaded page ${pageNumber}/${pageIds.length}${entry.textBlocks ? ` (+${entry.textBlocks.length} blocks +clean)` : ''}`)
+        // Clean (inpainted) image + text blocks for the SEO/HTML overlay reader.
+        try {
+          const { blob: clean } = await exportProject({
+            format: 'inpainted',
+            pages: [pageId],
+            defaultFont: prefs.defaultFont,
+          })
+          entry.inpaintedImageUrl = await uploadPage(
+            job.id,
+            pageNumber,
+            clean,
+            `${String(pageNumber).padStart(3, '0')}-clean.png`,
+          )
+        } catch (e) {
+          appendLog(`inpaint export page ${pageNumber} skipped: ${(e as Error).message}`)
+        }
+        const { textBlocks, width, height } = await fetchSceneBlocks(pageId)
+        if (textBlocks.length) {
+          entry.textBlocks = textBlocks
+          entry.pageWidth = width
+          entry.pageHeight = height
+        }
+
+        uploadedPages.push(entry)
+        appendLog(`Uploaded page ${pageNumber} (${uploadedPages.length}/${remaining.length})`)
+      }
+    } else {
+      appendLog('All pages already translated — finalizing.')
     }
 
     // 6. Complete

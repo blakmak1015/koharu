@@ -195,7 +195,10 @@ pub async fn run() -> Result<()> {
                     .as_str()
                     .parse()?
             } else {
-                format!("http://127.0.0.1:{port}").parse()?
+                // ?agent=1 tells the UI (AuthGate) to auto-start the translation
+                // agent — only the GUI "server" instance opens this window, so
+                // headless editor instances never auto-run the agent.
+                format!("http://127.0.0.1:{port}/?agent=1").parse()?
             };
             let wc = cfg
                 .app

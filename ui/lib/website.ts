@@ -187,6 +187,23 @@ export const resolveGlossary = (
   contextPrompt: string | null
 }> => web(`/api/glossary/resolve?contentId=${encodeURIComponent(contentId)}`, {}, t)
 
+// Save the editor's in-progress text blocks as a draft (resume later / survive
+// idle-kill). pages: [{ pageNumber, textBlocks, pageWidth, pageHeight }].
+export const saveDraft = (
+  jobId: string,
+  pages: unknown[],
+  t: string,
+): Promise<unknown> =>
+  web(
+    `/api/translator/chapters/${encodeURIComponent(jobId)}/draft`,
+    {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ pages }),
+    },
+    t,
+  )
+
 export const pushSeriesGlossary = (
   contentId: string,
   entries: WebGlossaryEntry[],

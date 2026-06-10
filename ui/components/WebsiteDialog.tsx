@@ -36,8 +36,10 @@ import {
   pushSeriesGlossary,
   reopenEdit,
   resolveGlossary,
+  saveDraft,
   submitPages,
 } from '@/lib/website'
+import { fetchSceneBlocks } from '@/lib/websiteAgent'
 import { useGlossaryStore } from '@/lib/stores/glossaryStore'
 
 const ACTIVE_JOB_KEY = 'website_active_job'
@@ -160,6 +162,22 @@ async function syncGlossaryUp(contentId: string, token: string): Promise<void> {
   } catch (e) {
     console.warn('glossary sync-up failed:', e)
   }
+}
+
+// Extract the current scene's translated text blocks per page (for draft-save
+// and submit). Page order matches upload order, so pageNumber = index + 1.
+async function buildDraftPages(pageIds: string[]) {
+  const pages: {
+    pageNumber: number
+    textBlocks: unknown[]
+    pageWidth: number
+    pageHeight: number
+  }[] = []
+  for (let i = 0; i < pageIds.length; i++) {
+    const { textBlocks, width, height } = await fetchSceneBlocks(pageIds[i])
+    pages.push({ pageNumber: i + 1, textBlocks, pageWidth: width, pageHeight: height })
+  }
+  return pages
 }
 
 export function WebsiteDialog({
@@ -390,30 +408,105 @@ export function WebsiteDialog({
     void onReviewTranslated(jobId, chapterId)
   }, [token, onReviewTranslated])
 
-  const onSubmit = useCallback(async () => {
+  // Disarmed once a submit fully succeeds, so the close-guard won't fire then.
+  const submittedRef = useRef(false)
+
+  // Auto-save the draft every 2 minutes while a job is active, so an idle-killed
+  // or accidentally-closed editor resumes from near-latest text.
+  useEffect(() => {
+    if (!token || !activeJob) return
+    const id = setInterval(() => {
+      void (async () => {
+        try {
+          const pages = await buildDraftPages(activeJob.pageIds)
+          await saveDraft(activeJob.chapterId, pages, token)
+        } catch {
+          /* best-effort auto-save */
+        }
+      })()
+    }, 120_000)
+    return () => clearInterval(id)
+  }, [token, activeJob])
+
+  // Guard against closing the tab before submit finishes / with unsaved work (F).
+  useEffect(() => {
+    const handler = (e: BeforeUnloadEvent) => {
+      if (busy || (activeJob && !submittedRef.current)) {
+        e.preventDefault()
+        e.returnValue = ''
+      }
+    }
+    window.addEventListener('beforeunload', handler)
+    return () => window.removeEventListener('beforeunload', handler)
+  }, [busy, activeJob])
+
+  // Save the current edits as a draft (button + auto-save). Lets the editor
+  // close / be idle-killed and resume later from the latest text.
+  const onSaveDraft = useCallback(async () => {
     if (!token || !activeJob) return
     setBusy(true)
+    setMsg('💾 กำลังเซฟ...')
     try {
-      // Step 1: render all pages so the "rendered" layer is up to date
-      setMsg('Rendering all pages...')
-      await renderAllPages(activeJob.pageIds)
-
-      // Step 2: export rendered blobs and submit to website
-      setMsg('Exporting & submitting...')
-      const blobs = await exportRenderedBlobs(activeJob.pageIds)
-      const res = await submitPages(activeJob.chapterId, blobs, token)
-      // Push any glossary edits back to the central store (live for next translate).
-      if (activeJob.contentId) await syncGlossaryUp(activeJob.contentId, token)
-      setMsg(`Submitted ${res.pageCount} page(s). Awaiting review.`)
-      saveActiveJob(null)
-      setActiveJob(null)
-      await refresh(token)
+      const pages = await buildDraftPages(activeJob.pageIds)
+      await saveDraft(activeJob.chapterId, pages, token)
+      setMsg('💾 เซฟแล้ว — ปิดแล้วกลับมาทำต่อได้')
     } catch (e) {
       setMsg(e instanceof Error ? e.message : String(e))
     } finally {
       setBusy(false)
     }
-  }, [token, activeJob, refresh])
+  }, [token, activeJob])
+
+  const onSubmit = useCallback(async () => {
+    if (!token || !activeJob) return
+    const total = activeJob.pageIds.length
+    setBusy(true)
+    try {
+      // 1. Render so the rendered layer + text sprites are current.
+      setMsg('กำลังเรนเดอร์ทุกหน้า...')
+      await renderAllPages(activeJob.pageIds)
+
+      // 2. Save text blocks so manga (HTML overlay) reflects the edits, not just
+      //    the baked raster (the web keeps the overlay; clearOverlay is off).
+      setMsg('กำลังบันทึกข้อความ...')
+      try {
+        const draftPages = await buildDraftPages(activeJob.pageIds)
+        await saveDraft(activeJob.chapterId, draftPages, token)
+      } catch (e) {
+        console.warn('textblock save before submit failed:', e)
+      }
+
+      // 3. Export + upload rendered pages with per-page progress (G).
+      const blobs: Blob[] = []
+      for (let i = 0; i < activeJob.pageIds.length; i++) {
+        setMsg(`กำลังอัปโหลด หน้า ${i + 1}/${total}...`)
+        const [b] = await exportRenderedBlobs([activeJob.pageIds[i]])
+        blobs.push(b)
+      }
+
+      setMsg('กำลังส่งให้แอดมินตรวจ...')
+      const res = await submitPages(activeJob.chapterId, blobs, token)
+      // Push any glossary edits back to the central store (live for next translate).
+      if (activeJob.contentId) await syncGlossaryUp(activeJob.contentId, token)
+
+      submittedRef.current = true // disarm the close guard
+      saveActiveJob(null)
+      setActiveJob(null)
+      setMsg(`✅ ส่งให้แอดมินตรวจแล้ว (${res.pageCount} หน้า) — กำลังปิดหน้าต่าง...`)
+      // F: auto-close this tab (it was opened via window.open from the website).
+      setTimeout(() => {
+        try {
+          window.close()
+        } catch {
+          /* if the browser blocks it, the success message stays */
+        }
+      }, 1200)
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }, [token, activeJob])
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -435,11 +528,16 @@ export function WebsiteDialog({
           {activeJob && (
             <Card className='space-y-2 p-3'>
               <div className='text-sm'>
-                Currently translating: <strong>{activeJob.title}</strong>
+                Currently editing: <strong>{activeJob.title}</strong>
               </div>
-              <Button onClick={onSubmit} disabled={busy}>
-                Submit this translation
-              </Button>
+              <div className='flex gap-2'>
+                <Button onClick={onSubmit} disabled={busy}>
+                  ✅ ส่งให้แอดมินตรวจ
+                </Button>
+                <Button variant='outline' onClick={onSaveDraft} disabled={busy}>
+                  💾 เซฟไว้ทำต่อ
+                </Button>
+              </div>
             </Card>
           )}
 
