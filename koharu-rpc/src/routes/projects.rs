@@ -27,9 +27,11 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(list_projects))
         .routes(routes!(create_project))
         .routes(routes!(import_project))
+        .routes(routes!(import_project_from_url))
         .routes(routes!(put_current_project))
         .routes(routes!(delete_current_project))
         .routes(routes!(export_current_project))
+        .routes(routes!(export_current_project_to_url))
 }
 
 // ---------------------------------------------------------------------------
@@ -169,6 +171,140 @@ async fn import_project(
         .await
         .map_err(ApiError::internal)?;
     Ok(Json(koharu_app::app::project_summary(&session)))
+}
+
+// ---------------------------------------------------------------------------
+// POST /projects/import-from-url — GET a `.khr` archive from a (presigned) URL
+// server-side, then import + open it. The website mints a presigned R2 GET URL
+// and koharu streams it directly (GPU box <-> R2), so the ~150MB archive never
+// transits the browser/tunnel. Mirror of POST /projects/import.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportFromUrlRequest {
+    /// Presigned GET URL of the `.khr` archive.
+    pub url: String,
+}
+
+#[utoipa::path(
+    post,
+    path = "/projects/import-from-url",
+    request_body = ImportFromUrlRequest,
+    responses((status = 200, body = ProjectSummary))
+)]
+async fn import_project_from_url(
+    State(app): State<AppState>,
+    Json(req): Json<ImportFromUrlRequest>,
+) -> ApiResult<Json<ProjectSummary>> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(600))
+        .build()
+        .map_err(|e| ApiError::internal(anyhow::anyhow!("http client: {e}")))?;
+    let resp = client
+        .get(&req.url)
+        .send()
+        .await
+        .map_err(|e| ApiError::bad_request(format!("GET archive: {e}")))?;
+    if !resp.status().is_success() {
+        return Err(ApiError::bad_request(format!(
+            "GET archive: HTTP {}",
+            resp.status()
+        )));
+    }
+    let body = resp
+        .bytes()
+        .await
+        .map_err(|e| ApiError::bad_request(format!("read archive: {e}")))?;
+    if body.is_empty() {
+        return Err(ApiError::bad_request("empty archive from url"));
+    }
+
+    let config = (**app.config.load()).clone();
+    let dest =
+        project_dirs::allocate_imported(&config, Some("imported")).map_err(ApiError::internal)?;
+    std::fs::remove_dir(dest.as_std_path())
+        .map_err(|e| ApiError::internal(anyhow::Error::new(e)))?;
+
+    let body_vec = body.to_vec();
+    let dest_c = dest.clone();
+    tokio::task::spawn_blocking(move || koharu_app::archive::import_khr_bytes(&body_vec, &dest_c))
+        .await
+        .map_err(|e| ApiError::internal(anyhow::Error::new(e)))?
+        .map_err(ApiError::internal)?;
+
+    let session = app
+        .open_project(dest, None)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(koharu_app::app::project_summary(&session)))
+}
+
+// ---------------------------------------------------------------------------
+// POST /projects/current/export-to-url — export the current project as a `.khr`
+// archive and PUT it to a (presigned) URL server-side (koharu <-> R2 direct).
+// The website mints a presigned R2 PUT URL with NO required Content-Type so the
+// raw body matches the signature. Mirror of the Khr branch of export below.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportToUrlRequest {
+    /// Presigned PUT URL to receive the `.khr` archive.
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportToUrlResponse {
+    pub bytes: u64,
+}
+
+#[utoipa::path(
+    post,
+    path = "/projects/current/export-to-url",
+    request_body = ExportToUrlRequest,
+    responses((status = 200, body = ExportToUrlResponse))
+)]
+async fn export_current_project_to_url(
+    State(app): State<AppState>,
+    Json(req): Json<ExportToUrlRequest>,
+) -> ApiResult<Json<ExportToUrlResponse>> {
+    let session = app
+        .current_session()
+        .ok_or_else(|| ApiError::bad_request("no project open"))?;
+
+    // Compact history before archiving (same as the synchronous export route).
+    let s_for_compact = session.clone();
+    tokio::task::spawn_blocking(move || s_for_compact.compact())
+        .await
+        .map_err(|e| ApiError::internal(anyhow::Error::new(e)))?
+        .map_err(ApiError::internal)?;
+
+    let src = session.dir.clone();
+    let bytes = tokio::task::spawn_blocking(move || koharu_app::archive::export_khr_bytes(&src))
+        .await
+        .map_err(|e| ApiError::internal(anyhow::Error::new(e)))?
+        .map_err(ApiError::internal)?;
+    let len = bytes.len() as u64;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(600))
+        .build()
+        .map_err(|e| ApiError::internal(anyhow::anyhow!("http client: {e}")))?;
+    let resp = client
+        .put(&req.url)
+        .body(bytes)
+        .send()
+        .await
+        .map_err(|e| ApiError::bad_request(format!("PUT archive: {e}")))?;
+    if !resp.status().is_success() {
+        return Err(ApiError::bad_request(format!(
+            "PUT archive: HTTP {}",
+            resp.status()
+        )));
+    }
+    Ok(Json(ExportToUrlResponse { bytes: len }))
 }
 
 // ---------------------------------------------------------------------------
