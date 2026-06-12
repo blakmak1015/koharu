@@ -26,6 +26,7 @@ image = { workspace = true }
 natord = { workspace = true }
 postcard = { workspace = true }
 rayon = { workspace = true }
+reqwest = { workspace = true }
 rmcp = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true }

@@ -182,6 +182,31 @@ export async function uploadPagesByPaths(paths: string[], replace: boolean): Pro
   return res.pages
 }
 
+/**
+ * Server-side import by URL: koharu fetches each inpainted page directly from
+ * the CDN (full GPU-box bandwidth, in parallel) instead of the browser
+ * downloading ~150MB and re-uploading it through the Cloudflare tunnel. The
+ * request body is just the URL list, so it also avoids Cloudflare's 100MB
+ * body cap. `urls[i]` becomes page i (request order is preserved server-side).
+ */
+export async function createPagesFromUrls(
+  urls: string[],
+  replace: boolean,
+): Promise<string[]> {
+  const res = await fetch('/api/v1/pages/from-urls', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ urls, replace }),
+  })
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '')
+    throw new Error(`from-urls ${res.status}: ${detail.slice(0, 300)}`)
+  }
+  const data = (await res.json()) as { pages: string[] }
+  await invalidateScene()
+  return data.pages
+}
+
 export async function uploadKhrArchive(file: File): Promise<ProjectSummary> {
   const bytes = await file.arrayBuffer()
   const summary = await importProject({

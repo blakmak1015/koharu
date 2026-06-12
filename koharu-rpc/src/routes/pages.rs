@@ -43,6 +43,7 @@ pub fn router() -> OpenApiRouter<AppState> {
     OpenApiRouter::default()
         .routes(routes!(create_pages))
         .routes(routes!(create_pages_from_paths))
+        .routes(routes!(create_pages_from_urls))
         .routes(routes!(add_image_layer))
         .routes(routes!(put_mask))
         .routes(routes!(reorder_text_nodes))
@@ -448,6 +449,199 @@ async fn create_pages_from_paths(
     let mut ops = Vec::with_capacity(decoded.len());
     let mut created_ids = Vec::with_capacity(decoded.len());
     for (i, (filename, w, h, blob)) in decoded.into_iter().enumerate() {
+        let mut page = Page::new(&filename, w, h);
+        let page_id = page.id;
+        let source_node_id = NodeId::new();
+        page.nodes.insert(
+            source_node_id,
+            Node {
+                id: source_node_id,
+                transform: Transform::default(),
+                visible: true,
+                kind: NodeKind::Image(ImageData {
+                    role: ImageRole::Source,
+                    blob,
+                    opacity: 1.0,
+                    natural_width: w,
+                    natural_height: h,
+                    name: Some(filename),
+                }),
+            },
+        );
+        created_ids.push(page_id);
+        ops.push(Op::AddPage {
+            page,
+            at: starting_index + i,
+        });
+    }
+
+    app.apply(Op::Batch {
+        ops,
+        label: "Import pages".into(),
+    })
+    .map_err(ApiError::internal)?;
+
+    Ok(Json(CreatePagesResponse { pages: created_ids }))
+}
+
+// ---------------------------------------------------------------------------
+// POST /pages/from-urls — server-side image ingress by URL.
+//
+// The website "review / edit" reconstruct used to download every inpainted
+// page into the browser and re-upload it as one multipart body. For a 40-50
+// page chapter that's ~150MB pulled down, then pushed back up through the
+// Cloudflare tunnel — bottlenecked by the client's UPLOAD bandwidth, double-
+// transiting the cloud, and tripping Cloudflare's 100MB request-body cap.
+//
+// This endpoint flips it: the browser sends only the URL list (a few KB) and
+// koharu fetches the images directly from the CDN (on the GPU box, full
+// bandwidth, in parallel). Order is taken from the request array — urls[i] is
+// page i — so we do NOT sort by filename (CDN names don't encode page order).
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CreatePagesFromUrlsRequest {
+    pub urls: Vec<String>,
+    #[serde(default)]
+    pub replace: bool,
+}
+
+/// GET a URL into bytes, retrying transient failures (connection reset,
+/// partial/decoded body, 5xx). CDN fetches under concurrency occasionally drop
+/// a response mid-body; a couple of retries makes the import reliable.
+async fn fetch_bytes_retry(
+    client: &reqwest::Client,
+    url: &str,
+    attempts: u32,
+) -> ApiResult<Vec<u8>> {
+    let mut last = String::from("no attempt made");
+    for attempt in 0..attempts.max(1) {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(250 * u64::from(attempt))).await;
+        }
+        match client.get(url).send().await {
+            Ok(resp) if resp.status().is_success() => match resp.bytes().await {
+                Ok(b) => return Ok(b.to_vec()),
+                Err(e) => last = format!("read body: {e}"),
+            },
+            Ok(resp) => last = format!("HTTP {}", resp.status()),
+            Err(e) => last = format!("send: {e}"),
+        }
+    }
+    Err(ApiError::bad_request(format!(
+        "fetch `{url}` failed after {} attempts: {last}",
+        attempts.max(1)
+    )))
+}
+
+#[utoipa::path(
+    post,
+    path = "/pages/from-urls",
+    request_body = CreatePagesFromUrlsRequest,
+    responses((status = 200, body = CreatePagesResponse))
+)]
+async fn create_pages_from_urls(
+    State(app): State<AppState>,
+    Json(req): Json<CreatePagesFromUrlsRequest>,
+) -> ApiResult<Json<CreatePagesResponse>> {
+    use futures::StreamExt;
+
+    let session = app
+        .current_session()
+        .ok_or_else(|| ApiError::bad_request("no project open"))?;
+
+    if req.urls.is_empty() {
+        return Err(ApiError::bad_request("no urls provided"));
+    }
+
+    // Fetch all images server-side, concurrently (bounded), keeping each blob
+    // at its request index so we preserve page order. Done BEFORE any clear so
+    // a fetch failure leaves the existing project untouched.
+    //
+    // Force HTTP/1.1 (one connection per request) so a single CDN HTTP/2 stream
+    // reset under concurrency can't corrupt the body ("error decoding response
+    // body"), and retry each URL a few times to ride out transient hiccups.
+    let client = reqwest::Client::builder()
+        .http1_only()
+        .timeout(std::time::Duration::from_secs(90))
+        .build()
+        .map_err(|e| ApiError::internal(anyhow::anyhow!("http client: {e}")))?;
+    let total = req.urls.len();
+    let fetched_stream = futures::stream::iter(req.urls.into_iter().enumerate().map(
+        |(i, url)| {
+            let client = client.clone();
+            async move {
+                let bytes = fetch_bytes_retry(&client, &url, 4).await?;
+                Ok::<(usize, Vec<u8>), ApiError>((i, bytes))
+            }
+        },
+    ))
+    .buffer_unordered(6);
+    futures::pin_mut!(fetched_stream);
+
+    let mut images: Vec<Option<Vec<u8>>> = vec![None; total];
+    while let Some(res) = fetched_stream.next().await {
+        let (i, bytes) = res?;
+        images[i] = Some(bytes);
+    }
+
+    // Optionally clear the project first (one undo step), matching create_pages.
+    let starting_index = if req.replace {
+        let scene = session.scene.read();
+        let remove_ops: Vec<Op> = scene
+            .pages
+            .keys()
+            .copied()
+            .map(|id| Op::RemovePage {
+                id,
+                prev_page: scene.pages[&id].clone(),
+                prev_index: scene.pages.get_index_of(&id).unwrap_or(0),
+            })
+            .collect();
+        drop(scene);
+        if !remove_ops.is_empty() {
+            app.apply(Op::Batch {
+                ops: remove_ops,
+                label: "Replace pages (clear)".into(),
+            })
+            .map_err(ApiError::internal)?;
+        }
+        0
+    } else {
+        session.scene.read().pages.len()
+    };
+
+    // Decode + hash + store in parallel, preserving the request order.
+    let blobs = session.blobs.clone();
+    let indexed: Vec<(usize, Vec<u8>)> = images
+        .into_iter()
+        .enumerate()
+        .map(|(i, b)| (i, b.unwrap_or_default()))
+        .collect();
+    let mut decoded: Vec<(usize, String, u32, u32, BlobRef)> =
+        tokio::task::spawn_blocking(move || {
+            indexed
+                .into_par_iter()
+                .map(|(i, bytes)| -> ApiResult<(usize, String, u32, u32, BlobRef)> {
+                    let filename = format!("page-{:04}.png", i + 1);
+                    let img = image::load_from_memory(&bytes).map_err(|e| {
+                        ApiError::bad_request(format!("decode `{filename}`: {e}"))
+                    })?;
+                    let (w, h) = img.dimensions();
+                    let blob = blobs.put_bytes(&bytes).map_err(ApiError::internal)?;
+                    Ok((i, filename, w, h, blob))
+                })
+                .collect::<ApiResult<Vec<_>>>()
+        })
+        .await
+        .map_err(|e| ApiError::internal(anyhow::anyhow!("import task panicked: {e}")))??;
+
+    decoded.sort_by_key(|(i, ..)| *i);
+
+    let mut ops = Vec::with_capacity(decoded.len());
+    let mut created_ids = Vec::with_capacity(decoded.len());
+    for (i, (_idx, filename, w, h, blob)) in decoded.into_iter().enumerate() {
         let mut page = Page::new(&filename, w, h);
         let page_id = page.id;
         let source_node_id = NodeId::new();

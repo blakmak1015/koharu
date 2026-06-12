@@ -18,7 +18,7 @@ import {
 } from '@/components/ui/dialog'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { getConfig, getSceneJson, startPipeline } from '@/lib/api/default/default'
-import { createAndOpenProject, uploadPages } from '@/lib/io/scene'
+import { createAndOpenProject, createPagesFromUrls, uploadPages } from '@/lib/io/scene'
 import { useAuthStore } from '@/lib/stores/authStore'
 import { useJobsStore } from '@/lib/stores/jobsStore'
 import { usePreferencesStore } from '@/lib/stores/preferencesStore'
@@ -138,6 +138,34 @@ async function fetchInpaintFiles(
     Array.from({ length: Math.min(CONCURRENCY, pages.length) }, worker),
   )
   return files
+}
+
+// Import the inpainted pages into the currently-open koharu project.
+//
+// Fast path: hand koharu the URL list so IT fetches the images directly from
+// the CDN (on the GPU box: full bandwidth, parallel, no 150MB browser round-
+// trip, and the tiny JSON body sidesteps Cloudflare's 100MB request cap).
+// Fallback: if the server can't reach the CDN, pull into the browser and
+// multipart-upload (works for smaller chapters).
+async function importInpaintPages(
+  pages: { pageNumber: number; inpaintedImageUrl: string }[],
+  setMsg: (m: string) => void,
+): Promise<string[]> {
+  try {
+    setMsg(`กำลังให้ koharu ดึงรูป ${pages.length} หน้าจาก CDN โดยตรง...`)
+    return await createPagesFromUrls(
+      pages.map((p) => p.inpaintedImageUrl),
+      true,
+    )
+  } catch (e) {
+    console.warn('from-urls import failed, falling back to browser upload', e)
+    setMsg('ดึงตรงไม่ได้ — ใช้วิธีสำรอง (โหลดผ่านเบราว์เซอร์)...')
+    const files = await fetchInpaintFiles(pages, (d, t) =>
+      setMsg(`กำลังโหลดรูป ${d}/${t}...`),
+    )
+    setMsg(`กำลังอัปโหลด ${files.length} รูปเข้า koharu...`)
+    return await uploadPages(files, true)
+  }
 }
 
 // Export each page of the current koharu project as a rendered PNG blob.
@@ -308,11 +336,7 @@ export function WebsiteDialog({
         }
         await syncGlossaryDown(c.contentId, token, c.seriesTitle)
         await createAndOpenProject({ name: `[EDIT] ${c.seriesTitle} Ch.${c.chapterNo}` })
-        const files = await fetchInpaintFiles(src.pages, (d, t) =>
-          setMsg(`กำลังโหลดรูป ${d}/${t}...`),
-        )
-        setMsg(`กำลังอัปโหลด ${files.length} รูปเข้า koharu...`)
-        const pageIds = await uploadPages(files, true)
+        const pageIds = await importInpaintPages(src.pages, setMsg)
         setMsg('กำลังใส่คำแปลกลับเข้าหน้า...')
         // Re-create the translated text nodes at their saved positions/colours
         // so the editor sees the existing translation to fix.
@@ -377,11 +401,7 @@ export function WebsiteDialog({
         }
         await syncGlossaryDown(src.contentId, token, name.replace(/^\[REVIEW\] /, ''))
         await createAndOpenProject({ name })
-        const files = await fetchInpaintFiles(src.pages, (d, t) =>
-          setMsg(`กำลังโหลดรูป ${d}/${t}...`),
-        )
-        setMsg(`กำลังอัปโหลด ${files.length} รูปเข้า koharu...`)
-        const pageIds = await uploadPages(files, true)
+        const pageIds = await importInpaintPages(src.pages, setMsg)
         setMsg('กำลังใส่คำแปลกลับเข้าหน้า...')
         for (let i = 0; i < pageIds.length; i++) {
           const blocks = src.pages[i]?.blocks ?? []
