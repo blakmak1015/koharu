@@ -109,6 +109,37 @@ async function renderAllPages(pageIds: string[]): Promise<void> {
   await waitForJob(operationId)
 }
 
+// Download inpainted page images with bounded concurrency. A 40-50 page chapter
+// is ~150MB+; fetching one-at-a-time made reconstruct look frozen ("Loading
+// translation for review..." with no movement). Parallel (6 at a time) cuts that
+// several-fold and reports progress so the dialog shows it's actually working.
+async function fetchInpaintFiles(
+  pages: { pageNumber: number; inpaintedImageUrl: string }[],
+  onProgress?: (done: number, total: number) => void,
+): Promise<File[]> {
+  const files: File[] = new Array(pages.length)
+  const total = pages.length
+  let done = 0
+  const queue = pages.map((p, i) => ({ p, i }))
+  const CONCURRENCY = 6
+  async function worker() {
+    for (;;) {
+      const item = queue.shift()
+      if (!item) return
+      const blob = await fetchImageBlob(item.p.inpaintedImageUrl)
+      files[item.i] = new File([blob], `${item.p.pageNumber}.png`, {
+        type: blob.type || 'image/png',
+      })
+      done += 1
+      onProgress?.(done, total)
+    }
+  }
+  await Promise.all(
+    Array.from({ length: Math.min(CONCURRENCY, pages.length) }, worker),
+  )
+  return files
+}
+
 // Export each page of the current koharu project as a rendered PNG blob.
 async function exportRenderedBlobs(pageIds: string[]): Promise<Blob[]> {
   const blobs: Blob[] = []
@@ -277,14 +308,12 @@ export function WebsiteDialog({
         }
         await syncGlossaryDown(c.contentId, token, c.seriesTitle)
         await createAndOpenProject({ name: `[EDIT] ${c.seriesTitle} Ch.${c.chapterNo}` })
-        const files: File[] = []
-        for (const p of src.pages) {
-          const blob = await fetchImageBlob(p.inpaintedImageUrl)
-          files.push(
-            new File([blob], `${p.pageNumber}.png`, { type: blob.type || 'image/png' }),
-          )
-        }
+        const files = await fetchInpaintFiles(src.pages, (d, t) =>
+          setMsg(`กำลังโหลดรูป ${d}/${t}...`),
+        )
+        setMsg(`กำลังอัปโหลด ${files.length} รูปเข้า koharu...`)
         const pageIds = await uploadPages(files, true)
+        setMsg('กำลังใส่คำแปลกลับเข้าหน้า...')
         // Re-create the translated text nodes at their saved positions/colours
         // so the editor sees the existing translation to fix.
         for (let i = 0; i < pageIds.length; i++) {
@@ -301,7 +330,7 @@ export function WebsiteDialog({
         }
         // Render so the injected text nodes get sprites and become visible in
         // the editor (see onReviewTranslated note). Renderer-only — no re-translate.
-        setMsg('Rendering translated text...')
+        setMsg('กำลังเรนเดอร์คำแปลทุกหน้า (อาจใช้เวลาสักครู่)...')
         await renderAllPages(pageIds)
 
         const job: ActiveJob = {
@@ -332,7 +361,7 @@ export function WebsiteDialog({
     async (jobId: string, chapterId: string) => {
       if (!token) return
       setBusy(true)
-      setMsg('Loading translation for review...')
+      setMsg('กำลังเตรียมงานเพื่อตรวจ...')
       try {
         // A friendly project name (job is already in my 'editing' list).
         let name = `[REVIEW] ${chapterId.slice(0, 8)}`
@@ -348,14 +377,12 @@ export function WebsiteDialog({
         }
         await syncGlossaryDown(src.contentId, token, name.replace(/^\[REVIEW\] /, ''))
         await createAndOpenProject({ name })
-        const files: File[] = []
-        for (const p of src.pages) {
-          const blob = await fetchImageBlob(p.inpaintedImageUrl)
-          files.push(
-            new File([blob], `${p.pageNumber}.png`, { type: blob.type || 'image/png' }),
-          )
-        }
+        const files = await fetchInpaintFiles(src.pages, (d, t) =>
+          setMsg(`กำลังโหลดรูป ${d}/${t}...`),
+        )
+        setMsg(`กำลังอัปโหลด ${files.length} รูปเข้า koharu...`)
         const pageIds = await uploadPages(files, true)
+        setMsg('กำลังใส่คำแปลกลับเข้าหน้า...')
         for (let i = 0; i < pageIds.length; i++) {
           const blocks = src.pages[i]?.blocks ?? []
           if (!blocks.length) continue
@@ -372,7 +399,7 @@ export function WebsiteDialog({
         // the editor (add_text_nodes only adds nodes; koharu draws the rendered
         // sprite). steps:[renderer] only typesets — it won't re-translate, so
         // our reconstructed text is preserved.
-        setMsg('Rendering translated text...')
+        setMsg('กำลังเรนเดอร์คำแปลทุกหน้า (อาจใช้เวลาสักครู่)...')
         await renderAllPages(pageIds)
 
         const job: ActiveJob = { chapterId: jobId, title: name, pageIds, contentId: src.contentId }
