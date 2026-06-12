@@ -16,6 +16,7 @@ import { Workspace, StatusBar } from '@/components/Canvas'
 import { Navigator } from '@/components/Navigator'
 import { Panels } from '@/components/Panels'
 import { WelcomeScreen } from '@/components/WelcomeScreen'
+import { usePrefetchPageBlobs } from '@/hooks/usePrefetchPageBlobs'
 import { useScene } from '@/hooks/useScene'
 import { useGetMeta } from '@/lib/api/default/default'
 import { useEditorUiStore } from '@/lib/stores/editorUiStore'
@@ -25,6 +26,9 @@ const LAYOUT_ID = 'koharu-main-layout-v3'
 
 export default function Page() {
   const hasProject = useScene().scene !== null
+  // Warm the browser cache with all page images so remote page-switching is
+  // instant instead of re-downloading ~3MB/page through the tunnel on first view.
+  usePrefetchPageBlobs()
   const showNavigator = useEditorUiStore((s) => s.showNavigator)
   const setShowNavigator = useEditorUiStore((s) => s.setShowNavigator)
   const leftPanelRef = useRef<PanelImperativeHandle>(null)
