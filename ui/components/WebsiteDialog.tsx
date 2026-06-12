@@ -27,6 +27,7 @@ import {
   type EditableChapter,
   claimChapter,
   fetchImageBlob,
+  presignKhrproj,
   fetchRawPage,
   getChapter,
   getEditSource,
@@ -44,11 +45,14 @@ import { useGlossaryStore } from '@/lib/stores/glossaryStore'
 
 const ACTIVE_JOB_KEY = 'website_active_job'
 type ActiveJob = {
+  /** NOTE: holds the translation_job id (used as the submit/draft :id). */
   chapterId: string
   title: string
   pageIds: string[]
   /** content_id of the series — used to sync the glossary back on submit. */
   contentId?: string
+  /** Real chapter id — used to presign the .khrproj master on submit. */
+  srcChapterId?: string
 }
 
 function loadActiveJob(): ActiveJob | null {
@@ -166,6 +170,38 @@ async function importInpaintPages(
     setMsg(`กำลังอัปโหลด ${files.length} รูปเข้า koharu...`)
     return await uploadPages(files, true)
   }
+}
+
+// Fast-path open: presign a GET for the chapter's .khrproj master and have
+// koharu fetch + import it server-side (render intact — no reconstruct, no
+// re-render). Returns the imported page ids in page order.
+async function importMasterProject(chapterId: string, token: string): Promise<string[]> {
+  const { url } = await presignKhrproj(chapterId, 'get', token)
+  const imp = await fetch('/api/v1/projects/import-from-url', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ url }),
+  })
+  if (!imp.ok) {
+    throw new Error(`import master ${imp.status}: ${(await imp.text()).slice(0, 200)}`)
+  }
+  const scene = await (await fetch('/api/v1/scene.json')).json()
+  return Object.keys(scene?.scene?.pages ?? scene?.pages ?? {})
+}
+
+// Export the current koharu project as the chapter's .khrproj master to R2
+// (presigned PUT, server-side stream). Returns the R2 key.
+async function exportMasterProject(chapterId: string, token: string): Promise<string> {
+  const { url, key } = await presignKhrproj(chapterId, 'put', token)
+  const exp = await fetch('/api/v1/projects/current/export-to-url', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ url }),
+  })
+  if (!exp.ok) {
+    throw new Error(`export master ${exp.status}: ${(await exp.text()).slice(0, 200)}`)
+  }
+  return key
 }
 
 // Export each page of the current koharu project as a rendered PNG blob.
@@ -335,33 +371,38 @@ export function WebsiteDialog({
           throw new Error('This chapter has no inpainted pages to edit.')
         }
         await syncGlossaryDown(c.contentId, token, c.seriesTitle)
-        await createAndOpenProject({ name: `[EDIT] ${c.seriesTitle} Ch.${c.chapterNo}` })
-        const pageIds = await importInpaintPages(src.pages, setMsg)
-        setMsg('กำลังใส่คำแปลกลับเข้าหน้า...')
-        // Re-create the translated text nodes at their saved positions/colours
-        // so the editor sees the existing translation to fix.
-        for (let i = 0; i < pageIds.length; i++) {
-          const blocks = src.pages[i]?.blocks ?? []
-          if (!blocks.length) continue
-          const res = await fetch(`/api/v1/pages/${pageIds[i]}/text-nodes`, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ blocks }),
-          })
-          if (!res.ok) {
-            throw new Error(`Inject text nodes (page ${i + 1}) failed: ${res.status}`)
+        let pageIds: string[]
+        if (src.masterKhrprojKey) {
+          // Fast path: import the koharu master (render intact — no reconstruct).
+          setMsg('กำลังโหลดโปรเจกต์ต้นฉบับจาก R2 (ไม่ต้องเรนเดอร์ใหม่)...')
+          pageIds = await importMasterProject(c.chapterId, token)
+        } else {
+          // Fallback: reconstruct from inpaint + saved text blocks, then render.
+          await createAndOpenProject({ name: `[EDIT] ${c.seriesTitle} Ch.${c.chapterNo}` })
+          pageIds = await importInpaintPages(src.pages, setMsg)
+          setMsg('กำลังใส่คำแปลกลับเข้าหน้า...')
+          for (let i = 0; i < pageIds.length; i++) {
+            const blocks = src.pages[i]?.blocks ?? []
+            if (!blocks.length) continue
+            const res = await fetch(`/api/v1/pages/${pageIds[i]}/text-nodes`, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ blocks }),
+            })
+            if (!res.ok) {
+              throw new Error(`Inject text nodes (page ${i + 1}) failed: ${res.status}`)
+            }
           }
+          setMsg('กำลังเรนเดอร์คำแปลทุกหน้า (อาจใช้เวลาสักครู่)...')
+          await renderAllPages(pageIds)
         }
-        // Render so the injected text nodes get sprites and become visible in
-        // the editor (see onReviewTranslated note). Renderer-only — no re-translate.
-        setMsg('กำลังเรนเดอร์คำแปลทุกหน้า (อาจใช้เวลาสักครู่)...')
-        await renderAllPages(pageIds)
 
         const job: ActiveJob = {
           chapterId: jobId,
           title: `[EDIT] ${c.seriesTitle} Ch.${c.chapterNo}`,
           pageIds,
           contentId: c.contentId,
+          srcChapterId: c.chapterId,
         }
         saveActiveJob(job)
         setActiveJob(job)
@@ -400,29 +441,39 @@ export function WebsiteDialog({
           throw new Error('This job has no inpainted pages to review.')
         }
         await syncGlossaryDown(src.contentId, token, name.replace(/^\[REVIEW\] /, ''))
-        await createAndOpenProject({ name })
-        const pageIds = await importInpaintPages(src.pages, setMsg)
-        setMsg('กำลังใส่คำแปลกลับเข้าหน้า...')
-        for (let i = 0; i < pageIds.length; i++) {
-          const blocks = src.pages[i]?.blocks ?? []
-          if (!blocks.length) continue
-          const res = await fetch(`/api/v1/pages/${pageIds[i]}/text-nodes`, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ blocks }),
-          })
-          if (!res.ok) {
-            throw new Error(`Inject text nodes (page ${i + 1}) failed: ${res.status}`)
+        let pageIds: string[]
+        if (src.masterKhrprojKey) {
+          // Fast path: import the koharu master (render intact — no reconstruct).
+          setMsg('กำลังโหลดโปรเจกต์ต้นฉบับจาก R2 (ไม่ต้องเรนเดอร์ใหม่)...')
+          pageIds = await importMasterProject(chapterId, token)
+        } else {
+          // Fallback: reconstruct from inpaint + text blocks, then render.
+          await createAndOpenProject({ name })
+          pageIds = await importInpaintPages(src.pages, setMsg)
+          setMsg('กำลังใส่คำแปลกลับเข้าหน้า...')
+          for (let i = 0; i < pageIds.length; i++) {
+            const blocks = src.pages[i]?.blocks ?? []
+            if (!blocks.length) continue
+            const res = await fetch(`/api/v1/pages/${pageIds[i]}/text-nodes`, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ blocks }),
+            })
+            if (!res.ok) {
+              throw new Error(`Inject text nodes (page ${i + 1}) failed: ${res.status}`)
+            }
           }
+          setMsg('กำลังเรนเดอร์คำแปลทุกหน้า (อาจใช้เวลาสักครู่)...')
+          await renderAllPages(pageIds)
         }
-        // Render so the injected text nodes get sprites and become visible in
-        // the editor (add_text_nodes only adds nodes; koharu draws the rendered
-        // sprite). steps:[renderer] only typesets — it won't re-translate, so
-        // our reconstructed text is preserved.
-        setMsg('กำลังเรนเดอร์คำแปลทุกหน้า (อาจใช้เวลาสักครู่)...')
-        await renderAllPages(pageIds)
 
-        const job: ActiveJob = { chapterId: jobId, title: name, pageIds, contentId: src.contentId }
+        const job: ActiveJob = {
+          chapterId: jobId,
+          title: name,
+          pageIds,
+          contentId: src.contentId,
+          srcChapterId: chapterId,
+        }
         saveActiveJob(job)
         setActiveJob(job)
         onOpenChange(false) // hand off to the editor
@@ -531,8 +582,21 @@ export function WebsiteDialog({
         blobs.push(b)
       }
 
+      // 3.5 Export the edited project as the chapter's .khrproj master so the
+      //     next open is instant (render intact). Best-effort — submit still
+      //     proceeds (and falls back to reconstruct) if this fails.
+      let masterKhrprojKey: string | undefined
+      if (activeJob.srcChapterId) {
+        try {
+          setMsg('กำลังบันทึกโปรเจกต์ต้นฉบับ...')
+          masterKhrprojKey = await exportMasterProject(activeJob.srcChapterId, token)
+        } catch (e) {
+          console.warn('master export on submit failed:', e)
+        }
+      }
+
       setMsg('กำลังส่งให้แอดมินตรวจ...')
-      const res = await submitPages(activeJob.chapterId, blobs, token)
+      const res = await submitPages(activeJob.chapterId, blobs, token, masterKhrprojKey)
       // Push any glossary edits back to the central store (live for next translate).
       if (activeJob.contentId) await syncGlossaryUp(activeJob.contentId, token)
 

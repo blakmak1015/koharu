@@ -117,9 +117,16 @@ export async function fetchRawPage(id: string, pageNo: number, t: string): Promi
 }
 
 // Submit final translated pages (PNG blobs, in order) back to the website.
-export async function submitPages(id: string, pages: Blob[], t: string): Promise<any> {
+// `masterKhrprojKey` (optional) records the .khrproj master the editor exported.
+export async function submitPages(
+  id: string,
+  pages: Blob[],
+  t: string,
+  masterKhrprojKey?: string,
+): Promise<any> {
   const fd = new FormData()
   pages.forEach((b, i) => fd.append('pages', b, `${i + 1}.png`))
+  if (masterKhrprojKey) fd.append('masterKhrprojKey', masterKhrprojKey)
   const res = await fetch(`${WEBSITE_API}/api/translator/chapters/${id}/submit`, {
     method: 'POST',
     headers: { authorization: `Bearer ${t}` },
@@ -161,7 +168,26 @@ export type EditSource = {
   chapterId: string
   contentId: string
   editable: boolean
+  // When set, a koharu .khrproj master exists on R2 — import it directly
+  // (render intact) instead of reconstructing from `pages` below.
+  masterKhrprojKey?: string | null
   pages: EditSourcePage[]
+}
+
+// Mint a short-lived presigned R2 URL for a chapter's .khrproj master archive.
+export async function presignKhrproj(
+  chapterId: string,
+  op: 'get' | 'put',
+  t: string,
+  kind: 'master' | 'wip' = 'master',
+): Promise<{ url: string; key: string; bucket: string }> {
+  const res = await fetch(`${WEBSITE_API}/api/admin/translation/khrproj/presign`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${t}` },
+    body: JSON.stringify({ chapterId, op, kind }),
+  })
+  if (!res.ok) throw new Error(`presign ${op} failed: ${res.status}`)
+  return res.json()
 }
 
 // Published manga chapters that can be re-opened in the editor.

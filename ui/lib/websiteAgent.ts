@@ -402,6 +402,8 @@ async function processOneJob(): Promise<boolean> {
       pageHeight?: number
     }
     const uploadedPages: CompletePage[] = []
+    // R2 key of the .khrproj master, set only on a clean full run (see below).
+    let masterKhrprojKey: string | undefined
     const prefs = usePreferencesStore.getState()
 
     if (remaining.length > 0) {
@@ -490,6 +492,41 @@ async function processOneJob(): Promise<boolean> {
         uploadedPages.push(entry)
         appendLog(`Uploaded page ${pageNumber} (${uploadedPages.length}/${remaining.length})`)
       }
+
+      // 5.5 Export the full koharu project as the .khrproj master to R2 — ONLY
+      // on a clean full run (no pages were pre-done in a prior interrupted run),
+      // because a resumed run's project holds only the pages processed this time.
+      // Server-side stream via a presigned PUT so the ~150MB never hits a browser.
+      // Best-effort: if it fails, the job still completes and review falls back to
+      // reconstruct.
+      if (!claim.donePageNumbers?.length) {
+        try {
+          appendLog('Exporting .khrproj master to R2...')
+          const presignRes = await agentFetch('/api/admin/translation/khrproj/presign', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ chapterId: job.chapterId, op: 'put' }),
+          })
+          if (presignRes.ok) {
+            const { url, key } = (await presignRes.json()) as { url: string; key: string }
+            const exp = await fetch('/api/v1/projects/current/export-to-url', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ url }),
+            })
+            if (exp.ok) {
+              masterKhrprojKey = key
+              appendLog('Master .khrproj stored on R2.')
+            } else {
+              appendLog(`Master export PUT failed: ${exp.status}`)
+            }
+          } else {
+            appendLog(`Master presign failed: ${presignRes.status}`)
+          }
+        } catch (e) {
+          appendLog(`Master export skipped: ${(e as Error).message}`)
+        }
+      }
     } else {
       appendLog('All pages already translated — finalizing.')
     }
@@ -503,6 +540,7 @@ async function processOneJob(): Promise<boolean> {
       body: JSON.stringify({
         jobId: job.id,
         pages: uploadedPages,
+        ...(masterKhrprojKey ? { masterKhrprojKey } : {}),
       }),
     })
     if (!completeRes.ok) {
