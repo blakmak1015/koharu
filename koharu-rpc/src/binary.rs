@@ -7,7 +7,7 @@
 use axum::Json;
 use axum::body::Body;
 use axum::extract::{Path, State};
-use axum::http::{HeaderValue, StatusCode, header::CONTENT_TYPE};
+use axum::http::{HeaderValue, StatusCode, header::CACHE_CONTROL, header::CONTENT_TYPE};
 use axum::response::{IntoResponse, Response};
 use image::{DynamicImage, GenericImageView, imageops::FilterType};
 use koharu_core::{BlobRef, ImageRole, NodeKind, PageId, Scene};
@@ -103,6 +103,14 @@ async fn get_blob(State(app): State<AppState>, Path(hash): Path<String>) -> ApiR
     resp.headers_mut().insert(
         CONTENT_TYPE,
         HeaderValue::from_static("application/octet-stream"),
+    );
+    // Blobs are content-addressed (blake3 hash == content), so a given URL's
+    // bytes never change. Let the browser + Cloudflare edge cache them forever.
+    // Without this, every page switch re-downloads the full ~3MB image through
+    // the tunnel — the dominant source of remote-editing lag ("เปลี่ยนรูปช้า").
+    resp.headers_mut().insert(
+        CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=31536000, immutable"),
     );
     Ok(resp.into_response())
 }
