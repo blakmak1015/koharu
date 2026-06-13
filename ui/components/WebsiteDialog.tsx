@@ -18,7 +18,7 @@ import {
 } from '@/components/ui/dialog'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { getConfig, getSceneJson, startPipeline } from '@/lib/api/default/default'
-import { createAndOpenProject, createPagesFromUrls, uploadPages } from '@/lib/io/scene'
+import { createAndOpenProject, createPagesFromUrls, invalidateScene, uploadPages } from '@/lib/io/scene'
 import { useAuthStore } from '@/lib/stores/authStore'
 import { useJobsStore } from '@/lib/stores/jobsStore'
 import { usePreferencesStore } from '@/lib/stores/preferencesStore'
@@ -185,6 +185,10 @@ async function importMasterProject(chapterId: string, token: string): Promise<st
   if (!imp.ok) {
     throw new Error(`import master ${imp.status}: ${(await imp.text()).slice(0, 200)}`)
   }
+  // import-from-url opened a new project server-side; invalidate the React Query
+  // scene cache so the editor UI refetches and actually shows the imported
+  // layers (otherwise the canvas stays on the stale/empty scene).
+  await invalidateScene()
   const scene = await (await fetch('/api/v1/scene.json')).json()
   return Object.keys(scene?.scene?.pages ?? scene?.pages ?? {})
 }
