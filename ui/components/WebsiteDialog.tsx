@@ -367,16 +367,14 @@ export function WebsiteDialog({
         }
         const jobId = reopened.jobId
         const src = await getEditSource(c.chapterId, token)
-        if (!src.editable || src.pages.length === 0) {
-          throw new Error('This chapter has no inpainted pages to edit.')
-        }
         await syncGlossaryDown(c.contentId, token, c.seriesTitle)
         let pageIds: string[]
         if (src.masterKhrprojKey) {
           // Fast path: import the koharu master (render intact — no reconstruct).
+          // Master takes precedence — opens even if public pages_json is sparse.
           setMsg('กำลังโหลดโปรเจกต์ต้นฉบับจาก R2 (ไม่ต้องเรนเดอร์ใหม่)...')
           pageIds = await importMasterProject(c.chapterId, token)
-        } else {
+        } else if (src.editable && src.pages.length > 0) {
           // Fallback: reconstruct from inpaint + saved text blocks, then render.
           await createAndOpenProject({ name: `[EDIT] ${c.seriesTitle} Ch.${c.chapterNo}` })
           pageIds = await importInpaintPages(src.pages, setMsg)
@@ -395,6 +393,10 @@ export function WebsiteDialog({
           }
           setMsg('กำลังเรนเดอร์คำแปลทุกหน้า (อาจใช้เวลาสักครู่)...')
           await renderAllPages(pageIds)
+        } else {
+          throw new Error(
+            'แชปนี้ไม่มีโปรเจกต์ต้นฉบับและไม่มีหน้า inpaint ให้แก้ (น่าจะเป็นแชปเก่าแบบฝังคำในรูป)',
+          )
         }
 
         const job: ActiveJob = {
@@ -437,16 +439,15 @@ export function WebsiteDialog({
         } catch {}
 
         const src = await getEditSource(chapterId, token)
-        if (!src.editable || src.pages.length === 0) {
-          throw new Error('This job has no inpainted pages to review.')
-        }
         await syncGlossaryDown(src.contentId, token, name.replace(/^\[REVIEW\] /, ''))
         let pageIds: string[]
         if (src.masterKhrprojKey) {
           // Fast path: import the koharu master (render intact — no reconstruct).
+          // Master takes precedence: a chapter with a master always opens, even
+          // if its public pages_json is sparse (baked / overwritten).
           setMsg('กำลังโหลดโปรเจกต์ต้นฉบับจาก R2 (ไม่ต้องเรนเดอร์ใหม่)...')
           pageIds = await importMasterProject(chapterId, token)
-        } else {
+        } else if (src.editable && src.pages.length > 0) {
           // Fallback: reconstruct from inpaint + text blocks, then render.
           await createAndOpenProject({ name })
           pageIds = await importInpaintPages(src.pages, setMsg)
@@ -465,6 +466,10 @@ export function WebsiteDialog({
           }
           setMsg('กำลังเรนเดอร์คำแปลทุกหน้า (อาจใช้เวลาสักครู่)...')
           await renderAllPages(pageIds)
+        } else {
+          throw new Error(
+            'แชปนี้ไม่มีโปรเจกต์ต้นฉบับและไม่มีหน้า inpaint ให้ตรวจ (น่าจะเป็นแชปเก่าแบบฝังคำในรูป)',
+          )
         }
 
         const job: ActiveJob = {
