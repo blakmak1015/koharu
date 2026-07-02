@@ -47,16 +47,25 @@ pub struct PromptRenderer {
     eos_token: String,
 }
 
-pub const BLOCK_TAG_INSTRUCTIONS: &str = "The input uses numbered tags like [1], [2], etc. to mark each text block. Translate only the text after each tag. Keep every tag exactly unchanged, including numbers and order. Output the same tags followed by the translated text. Do not merge, split, or reorder blocks.";
+pub const BLOCK_TAG_INSTRUCTIONS: &str = "The input uses numbered tags like [1], [2], etc. to mark each text block. Translate only the text after each tag. Keep every tag exactly unchanged, including numbers and order. Output the same tags followed by the translated text. Do not merge, split, reorder, add, or drop blocks: the number of [N] blocks you output must equal the number you received, and every block must keep its original number.";
 
 pub fn system_prompt(target_language: Language) -> String {
     format!(
-        "Translate manga dialogue from Japanese into natural, spoken {lang}. \
-         Rules: write entirely in {lang} script, no Japanese/Chinese/Korean characters in output, \
-         transliterate names into {lang}, keep it short for speech bubbles, match the character's tone and emotion. \
-         Input has [1], [2]… tags. Output the SAME tags followed by the translated line. \
+        "Translate manga dialogue into natural, spoken {lang}. \
+         The source may be Japanese OR already English (a scanlation) — translate ALL of it into {lang}. \
+         Write EVERY line entirely in {lang}, using ONLY the {lang} writing system: the output must contain \
+         no Japanese, Chinese, Korean, or English words. Never copy a source line through unchanged and \
+         never leave any block in English or in its source language. \
+         Transliterate names into {lang}, keep it short for speech bubbles, match the character's tone and emotion. \
+         {block_rules} \
+         SFX/onomatopoeia: render as a short, natural {lang} sound word; never romanize it and never leave the Japanese characters. \
+         Honorifics: translate さん as \"คุณ\", 先生 as \"อาจารย์\", 様 as \"คุณ\" (used as a prefix before the name); \
+         drop any other honorific suffix unless a glossary entry maps it, and never transliterate an honorific as a standalone syllable. \
+         Glossary terms: use the exact target spelling EVEN inside inflected or emphatic forms — small ッ (e.g. ウィルッ), long-vowel ー, or an attached っ/particle: \
+         strip the emphasis, match the base term, and keep the target spelling identical. \
          IMPORTANT: Output ONLY the tagged translations. No reasoning, no explanations, no alternatives, no romanization, no notes.",
-        lang = target_language
+        lang = target_language,
+        block_rules = BLOCK_TAG_INSTRUCTIONS,
     )
 }
 
