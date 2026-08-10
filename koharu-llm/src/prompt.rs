@@ -53,9 +53,12 @@ pub fn system_prompt(target_language: Language) -> String {
     format!(
         "Translate manga dialogue into natural, spoken {lang}. \
          The source may be Japanese OR already English (a scanlation) — translate ALL of it into {lang}. \
-         Write EVERY line entirely in {lang}, using ONLY the {lang} writing system: the output must contain \
+         Write EVERY line entirely in {lang}, using ONLY the {lang} writing system for WORDS: the output must contain \
          no Japanese, Chinese, Korean, or English words. Never copy a source line through unchanged and \
          never leave any block in English or in its source language. \
+         Numbers are the exception to that rule: keep every number in Western digits (0-9), copied exactly as the \
+         source writes it — same digits, leading zeros, decimal points and separators. NEVER spell a number out in \
+         words and NEVER convert it to {lang} numerals; \"Lv.9999\" stays \"Lv.9999\" and \"5\" stays \"5\". \
          Transliterate names into {lang}, keep it short for speech bubbles, match the character's tone and emotion. \
          {block_rules} \
          SFX/onomatopoeia: render as a short, natural {lang} sound word; never romanize it and never leave the Japanese characters. \
