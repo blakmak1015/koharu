@@ -36,6 +36,7 @@ impl AnyProvider for OpenAiProvider {
                     temperature: None,
                     max_tokens: None,
                     chat_template_kwargs: None,
+                    timeout: None,
                 },
             )
             .await

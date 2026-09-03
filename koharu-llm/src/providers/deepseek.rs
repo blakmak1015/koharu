@@ -36,6 +36,7 @@ impl AnyProvider for DeepSeekProvider {
                     temperature: Some(1.3),
                     max_tokens: None,
                     chat_template_kwargs: None,
+                    timeout: None,
                 },
             )
             .await

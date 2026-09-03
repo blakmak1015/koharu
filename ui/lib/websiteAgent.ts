@@ -114,9 +114,38 @@ export function subscribeAgent(fn: AgentListener): () => void {
 
 // --- helpers ----------------------------------------------------------------
 
+// The agent lives inside a long-running webview, and fetch() has NO default
+// timeout: one stalled TCP connection hangs a call forever. That is exactly how
+// the loop used to go silent for hours after a log line with nothing after it
+// (including the "report failure" call, which then never let the loop restart).
+// Every network call below gets a deadline; idempotent ones also retry.
+const DEFAULT_FETCH_TIMEOUT_MS = 60_000
+
+async function fetchDeadline(
+  input: string,
+  init: RequestInit = {},
+  timeoutMs = DEFAULT_FETCH_TIMEOUT_MS,
+  attempts = 1,
+): Promise<Response> {
+  let lastErr: unknown
+  for (let n = 1; n <= attempts; n++) {
+    try {
+      return await fetch(input, { ...init, signal: AbortSignal.timeout(timeoutMs) })
+    } catch (e) {
+      lastErr = e
+      const kind = (e as Error)?.name === 'TimeoutError' ? `timed out after ${Math.round(timeoutMs / 1000)}s` : (e as Error)?.message
+      appendLog(`fetch ${kind} (try ${n}/${attempts}): ${input.slice(0, 100)}`)
+      if (n < attempts) await new Promise((r) => setTimeout(r, 2_000 * n))
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr))
+}
+
 async function agentFetch(
   path: string,
   init: RequestInit = {},
+  timeoutMs = DEFAULT_FETCH_TIMEOUT_MS,
+  attempts = 1,
 ): Promise<Response> {
   const token = getAgentToken()
   const agentId = getAgentId()
@@ -125,7 +154,7 @@ async function agentFetch(
     'x-translation-agent-token': token,
     'x-translation-agent-id': agentId,
   }
-  return fetch(`${WEBSITE_API}${path}`, { ...init, headers })
+  return fetchDeadline(`${WEBSITE_API}${path}`, { ...init, headers }, timeoutMs, attempts)
 }
 
 async function waitForJob(jobId: string, timeoutMs = 2_700_000): Promise<void> {
@@ -148,7 +177,7 @@ async function sendHeartbeat(jobId: string): Promise<void> {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ jobId }),
-    })
+    }, 15_000)
   } catch {
     // heartbeat failures are non-fatal
   }
@@ -184,7 +213,9 @@ const contrastingStroke = (rgb: number[] | undefined): string => {
 // Bake a faint "manga-th.net" mark into the top-right of a rendered page (plain
 // grey, no outline) using the canvas — runs in the koharu webview. Never blocks
 // the upload: returns the original blob on any failure.
-async function brandBlob(blob: Blob): Promise<Blob> {
+export type WatermarkCorner = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right'
+
+export async function brandBlob(blob: Blob, corner: WatermarkCorner = 'top-right'): Promise<Blob> {
   try {
     const bmp = await createImageBitmap(blob)
     const W = bmp.width
@@ -197,13 +228,24 @@ async function brandBlob(blob: Blob): Promise<Blob> {
     ctx.drawImage(bmp, 0, 0)
     const fontPx = Math.max(22, Math.round(W * 0.045))
     ctx.font = `${fontPx}px sans-serif`
-    ctx.textBaseline = 'top'
     const text = 'manga-th.net'
     const tw = ctx.measureText(text).width
     const margin = Math.round(W * 0.02)
+    const onLeft = corner === 'top-left' || corner === 'bottom-left'
+    const onTop = corner === 'top-left' || corner === 'top-right'
+    const x = onLeft ? margin : W - tw - margin
+    ctx.textBaseline = onTop ? 'top' : 'bottom'
+    const y = onTop ? Math.round(H * 0.03) : Math.round(H * 0.97)
     ctx.fillStyle = 'rgba(110,110,110,0.5)'
-    ctx.fillText(text, W - tw - margin, Math.round(H * 0.05))
-    return await new Promise<Blob>((resolve) => canvas.toBlob((b) => resolve(b ?? blob), 'image/png'))
+    ctx.fillText(text, x, y)
+    // Re-encode as webp (q=0.92): manga inpaint/rendered pages are ~2MB as PNG,
+    // ~3-4x smaller as high-quality webp, so the reader (and the upload) is much
+    // faster. Both the rendered and the clean inpaint pass through here, so this
+    // is the single place that controls the published image format. q=0.92 keeps
+    // screentones crisp. Browser canvas webp is lossy-only (no lossless mode).
+    return await new Promise<Blob>((resolve) =>
+      canvas.toBlob((b) => resolve(b ?? blob), 'image/webp', 0.92),
+    )
   } catch {
     return blob
   }
@@ -218,7 +260,7 @@ async function uploadPage(jobId: string, pageNumber: number, blob: Blob, fileNam
     method: 'POST',
     headers: { 'content-type': blob.type || 'image/png' },
     body: await blob.arrayBuffer(),
-  })
+  }, 180_000, 3)
   if (!res.ok) {
     const err = await res.json().catch(() => ({}))
     throw new Error(`Upload page ${pageNumber} failed: ${(err as { error?: string }).error || res.statusText}`)
@@ -229,12 +271,27 @@ async function uploadPage(jobId: string, pageNumber: number, blob: Blob, fileNam
 
 // Extract translated text blocks for one koharu page as PROPORTIONAL (0-1) boxes
 // from the live scene, so the web reader can overlay them as HTML text (SEO).
-export async function fetchSceneBlocks(koharuPageId: string): Promise<{ textBlocks: TextBlock[]; width: number; height: number }> {
+// `prefetchedScene` lets a caller fetch /api/v1/scene.json ONCE and reuse it for
+// every page, instead of re-downloading the whole scene per page (which was
+// very slow over the remote editor tunnel for a 40+ page chapter).
+export async function fetchSceneJson(): Promise<{ scene?: { pages?: Record<string, unknown> } } | null> {
+  try {
+    const res = await fetchDeadline('/api/v1/scene.json', {}, 60_000, 2)
+    if (!res.ok) return null
+    return (await res.json()) as { scene?: { pages?: Record<string, unknown> } }
+  } catch {
+    return null
+  }
+}
+
+export async function fetchSceneBlocks(
+  koharuPageId: string,
+  prefetchedScene?: { scene?: { pages?: Record<string, unknown> } } | null,
+): Promise<{ textBlocks: TextBlock[]; width: number; height: number }> {
   type BoxT = { x?: number; y?: number; width?: number; height?: number; rotationDeg?: number }
   try {
-    const res = await fetch('/api/v1/scene.json')
-    if (!res.ok) return { textBlocks: [], width: 0, height: 0 }
-    const scene = (await res.json()) as { scene?: { pages?: Record<string, unknown> } }
+    const scene = prefetchedScene !== undefined ? prefetchedScene : await fetchSceneJson()
+    if (!scene) return { textBlocks: [], width: 0, height: 0 }
     const page = scene?.scene?.pages?.[koharuPageId] as
       | { width?: number; height?: number; nodes?: Record<string, unknown> }
       | undefined
@@ -291,56 +348,86 @@ export async function fetchSceneBlocks(koharuPageId: string): Promise<{ textBloc
   }
 }
 
-// Make sure koharu has an LLM model loaded before translating. A freshly
+type LoadedTarget = { kind?: string; providerId?: string | null; modelId?: string }
+
+/** The remote llama.cpp server. A LOCAL model here silently emits English. */
+const REQUIRED_PROVIDER_ID = 'openai-compatible'
+
+// Make sure koharu has the PROVIDER LLM loaded before translating. A freshly
 // (re)started koharu has no model selected; the `llm` step would then fail and
-// nothing renders. Idempotent — returns immediately if one is already ready.
-async function ensureLlmLoaded(): Promise<void> {
+// nothing renders. Idempotent — returns immediately if the provider is already
+// ready. Returns false (never a local fallback) when no provider is reachable.
+async function ensureLlmLoaded(): Promise<boolean> {
   try {
-    const cur = await fetch('/api/v1/llm/current').then((r) => (r.ok ? r.json() : null)).catch(() => null)
-    if (cur && String(cur.status).toLowerCase() === 'ready' && cur.target) return
-    const cat = (await fetch('/api/v1/llm/catalog').then((r) => r.json())) as {
-      models?: { target: { providerId?: string } }[]
-      localModels?: { target: unknown }[]
+    const cur = await fetchDeadline('/api/v1/llm/current', {}, 15_000)
+      .then((r) => (r.ok ? r.json() : null))
+      .catch(() => null)
+    const curTarget = cur?.target as LoadedTarget | undefined
+    if (String(cur?.status ?? '').toLowerCase() === 'ready' && curTarget?.kind === 'provider') return true
+    if (curTarget && curTarget.kind !== 'provider') {
+      appendLog(`LLM is on a LOCAL model (${curTarget.modelId}) — switching back to the provider`)
     }
-    const providerModels = cat.models ?? []
-    const pick = providerModels.find((m) => m.target.providerId === 'openai-compatible') ?? providerModels[0] ?? (cat.localModels ?? [])[0]
+
+    // NOTE the shape: the catalog is { localModels, providers[].models } — an
+    // earlier version read a non-existent `models` key, so every lookup fell
+    // through to localModels[0] and the agent quietly translated to English.
+    const cat = (await fetchDeadline('/api/v1/llm/catalog', {}, 30_000).then((r) => r.json())) as {
+      providers?: {
+        id: string
+        status?: string
+        models?: { target: LoadedTarget; name?: string }[]
+      }[]
+    }
+    const providers = cat.providers ?? []
+    const ready = providers.filter((p) => p.status === 'ready' && (p.models?.length ?? 0) > 0)
+    const usable = ready.find((p) => p.id === REQUIRED_PROVIDER_ID) ?? ready[0]
+    const pick = usable?.models?.[0]
     if (!pick) {
-      appendLog('No LLM model available to load')
-      return
+      const seen = providers.map((p) => `${p.id}=${p.status ?? '?'}`).join(', ') || 'none'
+      appendLog(`No provider LLM reachable (${seen}). NOT falling back to a local model — idling.`)
+      return false
     }
-    appendLog('Loading LLM model...')
-    await fetch('/api/v1/llm/current', {
+    appendLog(`Loading provider LLM ${pick.target.modelId} via ${usable.id}...`)
+    await fetchDeadline('/api/v1/llm/current', {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ target: (pick as { target: unknown }).target }),
+      body: JSON.stringify({ target: pick.target }),
     })
     for (let i = 0; i < 60; i++) {
       await new Promise((r) => setTimeout(r, 1000))
-      const s = await fetch('/api/v1/llm/current').then((r) => r.json()).catch(() => null)
+      const s = await fetchDeadline('/api/v1/llm/current', {}, 15_000).then((r) => r.json()).catch(() => null)
       const st = String(s?.status ?? '').toLowerCase()
-      if (st === 'ready') {
-        appendLog('LLM ready')
-        return
+      if (st === 'ready' && (s?.target as LoadedTarget | undefined)?.kind === 'provider') {
+        appendLog('LLM ready (provider)')
+        return true
       }
       if (st === 'error') {
         appendLog(`LLM load error: ${s?.error ?? 'unknown'}`)
-        return
+        return false
       }
     }
+    appendLog('LLM did not become ready within 60s')
+    return false
   } catch (e) {
     appendLog(`ensureLlmLoaded failed: ${(e as Error).message}`)
+    return false
   }
 }
 
 // --- main loop --------------------------------------------------------------
 
 async function processOneJob(): Promise<boolean> {
+  // 0. The agent must translate through the provider LLM. Check BEFORE
+  //    claiming: if the provider is down we simply idle instead of claiming a
+  //    job and then failing it (or, worse, translating it with a local model).
+  if (!(await ensureLlmLoaded())) return false
+
   // 1. Claim
   setState({ status: 'polling' })
   appendLog('Polling for jobs...')
   const claimRes = await agentFetch('/api/admin/translation/agent/claim', {
     method: 'POST',
-  })
+  }, 45_000)
   if (!claimRes.ok) {
     throw new Error(`Claim failed: ${claimRes.status} ${claimRes.statusText}`)
   }
@@ -386,7 +473,7 @@ async function processOneJob(): Promise<boolean> {
     for (const page of remaining) {
       if (_abortController?.signal.aborted) throw new Error('Agent stopped')
       const url = page.imageUrl.startsWith('http') ? page.imageUrl : `${WEBSITE_API}${page.imageUrl}`
-      const res = await fetch(url)
+      const res = await fetchDeadline(url, {}, 90_000, 3)
       if (!res.ok) throw new Error(`Failed to download page ${page.pageNumber}: ${res.status}`)
       const blob = await res.blob()
       files.push(new File([blob], `${page.pageNumber}.png`, { type: blob.type || 'image/png' }))
@@ -413,8 +500,7 @@ async function processOneJob(): Promise<boolean> {
       await createAndOpenProject({ name: `agent-${job.id.slice(0, 8)}` })
       const pageIds = await uploadPages(files, true)
 
-      // 4. Pipeline config
-      await ensureLlmLoaded()
+      // 4. Pipeline config (the LLM was already verified before the claim)
       await sendHeartbeat(job.id)
       const cfg = await getConfig()
       if (!cfg.pipeline) throw new Error('No pipeline configuration found')
@@ -434,64 +520,77 @@ async function processOneJob(): Promise<boolean> {
         appendLog(`Using central glossary (${claim.systemPrompt.length} chars)`)
       }
 
-      // 5. Process ONE PAGE AT A TIME: pipeline a single page, then export +
-      //    upload it immediately. Each uploaded page is persisted server-side,
-      //    so a crash/close/restart resumes from the next page instead of
-      //    redoing the whole chapter.
+      // 5. Process pages with a small worker pool. A single page never saturates
+      //    the GPU (CPU/I-O/LLM gaps), so running a few concurrently fills those
+      //    gaps and is much faster. Each uploaded page is still persisted
+      //    server-side independently, so a crash/restart resumes from the pages
+      //    that weren't done yet (order no longer matters). Concurrency is
+      //    configurable (prefs.agentPageConcurrency; 1 = old sequential behavior).
       setState({ status: 'processing' })
-      for (let i = 0; i < pageIds.length; i++) {
-        if (_abortController?.signal.aborted) throw new Error('Agent stopped')
-        const pageId = pageIds[i]
-        const pageNumber = remaining[i]?.pageNumber ?? i + 1
-        appendLog(`Translating page ${pageNumber} (${i + 1}/${remaining.length})...`)
-        const { operationId } = await startPipeline({
-          steps,
-          pages: [pageId],
-          targetLanguage: job.targetLanguage || undefined,
-          defaultFont: prefs.defaultFont,
-          systemPrompt: claim.systemPrompt ?? undefined,
-        })
-        await waitForJob(operationId)
-        await sendHeartbeat(job.id)
+      const pageConcurrency = Math.max(1, prefs.agentPageConcurrency || 1)
+      let nextPageIdx = 0
+      const processOnePage = async (): Promise<void> => {
+        for (;;) {
+          if (_abortController?.signal.aborted) throw new Error('Agent stopped')
+          const i = nextPageIdx++
+          if (i >= pageIds.length) return
+          const pageId = pageIds[i]
+          const pageNumber = remaining[i]?.pageNumber ?? i + 1
+          appendLog(`Translating page ${pageNumber} (${i + 1}/${remaining.length})...`)
+          const { operationId } = await startPipeline({
+            steps,
+            pages: [pageId],
+            targetLanguage: job.targetLanguage || undefined,
+            defaultFont: prefs.defaultFont,
+            systemPrompt: claim.systemPrompt ?? undefined,
+          })
+          await waitForJob(operationId)
+          await sendHeartbeat(job.id)
 
-        // Rendered page -> bake watermark -> upload.
-        const { blob: renderedRaw } = await exportProject({
-          format: 'rendered',
-          pages: [pageId],
-          defaultFont: prefs.defaultFont,
-        })
-        const rendered = await brandBlob(renderedRaw)
-        const entry: CompletePage = {
-          pageNumber,
-          translatedImageUrl: await uploadPage(job.id, pageNumber, rendered),
-        }
-
-        // Clean (inpainted) image + text blocks for the SEO/HTML overlay reader.
-        try {
-          const { blob: clean } = await exportProject({
-            format: 'inpainted',
+          // Rendered page -> bake watermark -> upload.
+          const { blob: renderedRaw } = await exportProject({
+            format: 'rendered',
             pages: [pageId],
             defaultFont: prefs.defaultFont,
           })
-          entry.inpaintedImageUrl = await uploadPage(
-            job.id,
+          const rendered = await brandBlob(renderedRaw, prefs.watermarkCorner)
+          const entry: CompletePage = {
             pageNumber,
-            clean,
-            `${String(pageNumber).padStart(3, '0')}-clean.png`,
-          )
-        } catch (e) {
-          appendLog(`inpaint export page ${pageNumber} skipped: ${(e as Error).message}`)
-        }
-        const { textBlocks, width, height } = await fetchSceneBlocks(pageId)
-        if (textBlocks.length) {
-          entry.textBlocks = textBlocks
-          entry.pageWidth = width
-          entry.pageHeight = height
-        }
+            translatedImageUrl: await uploadPage(job.id, pageNumber, rendered),
+          }
 
-        uploadedPages.push(entry)
-        appendLog(`Uploaded page ${pageNumber} (${uploadedPages.length}/${remaining.length})`)
+          // Clean (inpainted) image + text blocks for the SEO/HTML overlay reader.
+          // The reader shows THIS image (not the rendered one), so the watermark
+          // must be baked here too or it won't appear on the published page.
+          try {
+            const { blob: clean } = await exportProject({
+              format: 'inpainted',
+              pages: [pageId],
+              defaultFont: prefs.defaultFont,
+            })
+            entry.inpaintedImageUrl = await uploadPage(
+              job.id,
+              pageNumber,
+              await brandBlob(clean, prefs.watermarkCorner),
+              `${String(pageNumber).padStart(3, '0')}-clean.png`,
+            )
+          } catch (e) {
+            appendLog(`inpaint export page ${pageNumber} skipped: ${(e as Error).message}`)
+          }
+          const { textBlocks, width, height } = await fetchSceneBlocks(pageId)
+          if (textBlocks.length) {
+            entry.textBlocks = textBlocks
+            entry.pageWidth = width
+            entry.pageHeight = height
+          }
+
+          uploadedPages.push(entry)
+          appendLog(`Uploaded page ${pageNumber} (${uploadedPages.length}/${remaining.length})`)
+        }
       }
+      await Promise.all(
+        Array.from({ length: Math.min(pageConcurrency, pageIds.length) }, processOnePage),
+      )
 
       // 5.5 Export the full koharu project as the .khrproj master to R2 — ONLY
       // on a clean full run (no pages were pre-done in a prior interrupted run),
@@ -506,14 +605,14 @@ async function processOneJob(): Promise<boolean> {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ chapterId: job.chapterId, op: 'put' }),
-          })
+          }, 30_000)
           if (presignRes.ok) {
             const { url, key } = (await presignRes.json()) as { url: string; key: string }
-            const exp = await fetch('/api/v1/projects/current/export-to-url', {
+            const exp = await fetchDeadline('/api/v1/projects/current/export-to-url', {
               method: 'POST',
               headers: { 'content-type': 'application/json' },
               body: JSON.stringify({ url }),
-            })
+            }, 900_000)
             if (exp.ok) {
               masterKhrprojKey = key
               appendLog('Master .khrproj stored on R2.')
@@ -542,7 +641,7 @@ async function processOneJob(): Promise<boolean> {
         pages: uploadedPages,
         ...(masterKhrprojKey ? { masterKhrprojKey } : {}),
       }),
-    })
+    }, 180_000)
     if (!completeRes.ok) {
       const err = await completeRes.json().catch(() => ({}))
       throw new Error(`Complete failed: ${(err as { error?: string }).error || completeRes.statusText}`)
@@ -591,7 +690,7 @@ async function agentLoop(signal: AbortSignal): Promise<void> {
               jobId: _state.currentJob.id,
               error: msg,
             }),
-          })
+          }, 20_000, 2)
           appendLog(`Reported failure for job ${_state.currentJob.id}`)
         } catch {
           appendLog('Failed to report job failure to website')

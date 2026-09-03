@@ -3,8 +3,18 @@ use serde::Deserialize;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::Language;
+
+/// Bound a single translation request in wall-clock time. The shared HTTP
+/// client only sets a per-read timeout (resets on each streamed byte), so a
+/// "thinking" model that streams reasoning/keepalive can hang the call for
+/// hours; this total timeout caps it. NOTE: the shared client retries
+/// transient failures (timeouts included) up to 3x, so the effective worst
+/// case is ~4x this value. 90s comfortably exceeds a healthy dense page
+/// (~10-40s at ~39 tok/s) while bounding a stuck call to ~6 min instead of 6h.
+const TRANSLATION_REQUEST_TIMEOUT_SECS: u64 = 90;
 
 use super::chat_completions::{ChatCompletionsAuth, ChatCompletionsRequest, send_chat_completion};
 use super::{AnyProvider, ensure_provider_success, resolve_system_prompt};
@@ -101,6 +111,7 @@ impl AnyProvider for OpenAiCompatibleProvider {
                     // the translation directly. Harmless for servers whose
                     // template ignores the kwarg.
                     chat_template_kwargs: Some(serde_json::json!({ "enable_thinking": false })),
+                    timeout: Some(Duration::from_secs(TRANSLATION_REQUEST_TIMEOUT_SECS)),
                 },
             )
             .await

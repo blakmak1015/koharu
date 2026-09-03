@@ -24,6 +24,12 @@ pub struct ChatCompletionsRequest {
     /// OpenAI-compatible servers like llama.cpp/vLLM; left `None` for the
     /// hosted OpenAI/DeepSeek APIs, which reject unknown fields.
     pub chat_template_kwargs: Option<serde_json::Value>,
+    /// Total per-request wall-clock timeout. The shared client only sets a
+    /// per-read timeout, which resets on every received byte — a server that
+    /// dribbles reasoning/keepalive tokens forever never trips it (this is the
+    /// mechanism behind multi-hour hangs). A total timeout bounds the call.
+    /// `None` keeps the old unbounded behavior for the hosted APIs.
+    pub timeout: Option<std::time::Duration>,
 }
 
 #[derive(Serialize)]
@@ -68,6 +74,9 @@ pub async fn send_chat_completion(
     let mut http_request = http_client.post(&request.endpoint);
     if let ChatCompletionsAuth::Bearer(api_key) = request.auth {
         http_request = http_request.bearer_auth(api_key);
+    }
+    if let Some(timeout) = request.timeout {
+        http_request = http_request.timeout(timeout);
     }
 
     let response = http_request
