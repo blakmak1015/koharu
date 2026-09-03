@@ -141,7 +141,7 @@ export function composeGlossaryPrompt(glossary?: Glossary): string | undefined {
 
   const lines: string[] = []
   lines.push(
-    `Series glossary for "${glossary.name}". Use these translations consistently every time the source term appears; keep names and special terms identical across the whole series:`,
+    `Series glossary for "${glossary.name}". Use these translations consistently every time the source term appears; keep names and special terms identical across the whole series. Apply the target spelling even within inflected or emphatic forms (small ッ, long-vowel ー, an attached っ or particle): strip the emphasis, match the base term, and keep the target spelling identical:`,
   )
   for (const { source, target } of pairs) {
     lines.push(`- ${source} → ${target}`)

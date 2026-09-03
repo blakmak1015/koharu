@@ -13,6 +13,13 @@ type PreferencesState = {
   setBrushConfig: (config: Partial<PreferencesState['brushConfig']>) => void
   defaultFont?: string
   setDefaultFont: (font?: string) => void
+  /** Corner where the "manga-th.net" watermark is baked into uploaded pages. */
+  watermarkCorner: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right'
+  setWatermarkCorner: (corner: PreferencesState['watermarkCorner']) => void
+  /** How many pages the translation agent processes at once. 1 = sequential.
+   *  Higher fills GPU idle gaps (a single page doesn't saturate the GPU). */
+  agentPageConcurrency: number
+  setAgentPageConcurrency: (n: number) => void
   favoriteFonts: string[]
   toggleFavoriteFont: (font: string) => void
   customSystemPrompt?: string
@@ -43,6 +50,8 @@ const initialPreferences = {
     color: '#ffffff',
   },
   favoriteFonts: [],
+  watermarkCorner: 'top-right' as const,
+  agentPageConcurrency: 2,
   shortcuts: {
     select: 'V',
     block: 'M',
@@ -71,6 +80,9 @@ export const usePreferencesStore = create<PreferencesState>()(
           },
         })),
       setDefaultFont: (font) => set({ defaultFont: font }),
+      setWatermarkCorner: (corner) => set({ watermarkCorner: corner }),
+      setAgentPageConcurrency: (n) =>
+        set({ agentPageConcurrency: Math.max(1, Math.min(6, Math.floor(n) || 1)) }),
       toggleFavoriteFont: (font) =>
         set((state) => ({
           favoriteFonts: state.favoriteFonts.includes(font)
@@ -134,6 +146,8 @@ export const usePreferencesStore = create<PreferencesState>()(
       partialize: (state) => ({
         brushConfig: state.brushConfig,
         defaultFont: state.defaultFont,
+        watermarkCorner: state.watermarkCorner,
+        agentPageConcurrency: state.agentPageConcurrency,
         favoriteFonts: state.favoriteFonts,
         customSystemPrompt: state.customSystemPrompt,
         codexImagePrompt: state.codexImagePrompt,

@@ -711,6 +711,10 @@ function TranslationPane() {
   const { t } = useTranslation()
   const customSystemPrompt = usePreferencesStore((s) => s.customSystemPrompt)
   const setCustomSystemPrompt = usePreferencesStore((s) => s.setCustomSystemPrompt)
+  const watermarkCorner = usePreferencesStore((s) => s.watermarkCorner)
+  const setWatermarkCorner = usePreferencesStore((s) => s.setWatermarkCorner)
+  const agentPageConcurrency = usePreferencesStore((s) => s.agentPageConcurrency)
+  const setAgentPageConcurrency = usePreferencesStore((s) => s.setAgentPageConcurrency)
 
   return (
     <div className='space-y-6'>
@@ -745,6 +749,55 @@ function TranslationPane() {
               })}
             </p>
           </div>
+        </div>
+      </Section>
+
+      <Section
+        title={t('settings.watermarkTitle', { defaultValue: 'Watermark' })}
+        description={t('settings.watermarkDescription', {
+          defaultValue:
+            'Corner where the "manga-th.net" watermark is baked into every uploaded page (baked into the image — not removable in the reader).',
+        })}
+      >
+        <div className='space-y-1.5'>
+          <Label className='text-xs'>
+            {t('settings.watermarkCorner', { defaultValue: 'Position' })}
+          </Label>
+          <Select value={watermarkCorner} onValueChange={(v) => setWatermarkCorner(v as typeof watermarkCorner)}>
+            <SelectTrigger className='w-full'>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value='top-left'>Top left</SelectItem>
+              <SelectItem value='top-right'>Top right</SelectItem>
+              <SelectItem value='bottom-left'>Bottom left</SelectItem>
+              <SelectItem value='bottom-right'>Bottom right</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      </Section>
+
+      <Section
+        title={t('settings.agentSpeedTitle', { defaultValue: 'Translation speed' })}
+        description={t('settings.agentSpeedDescription', {
+          defaultValue:
+            'How many pages the auto-translate agent processes at once. A single page does not saturate the GPU, so 2-3 is much faster. Raise only if you have spare VRAM; 1 = sequential.',
+        })}
+      >
+        <div className='space-y-1.5'>
+          <Label className='text-xs'>
+            {t('settings.agentPageConcurrency', { defaultValue: 'Pages in parallel' })}
+          </Label>
+          <Input
+            type='number'
+            min='1'
+            max='6'
+            step='1'
+            inputMode='numeric'
+            className='w-24'
+            value={agentPageConcurrency}
+            onChange={(e) => setAgentPageConcurrency(Number.parseInt(e.target.value, 10) || 1)}
+          />
         </div>
       </Section>
 

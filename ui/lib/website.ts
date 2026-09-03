@@ -116,21 +116,90 @@ export async function fetchRawPage(id: string, pageNo: number, t: string): Promi
   return res.blob()
 }
 
+// Upload one image blob to the chapter's translation storage and return its
+// public URL. Each upload gets a fresh, unique R2 key server-side (the fileName
+// is only a cosmetic key suffix), so the clean (inpaint) and rendered images for
+// the same page never collide.
+async function uploadOnePage(
+  id: string,
+  t: string,
+  pageNumber: number,
+  blob: Blob,
+  fileName: string,
+): Promise<string> {
+  const qs = new URLSearchParams({ pageNumber: String(pageNumber), fileName })
+  const res = await fetch(
+    `${WEBSITE_API}/api/translator/chapters/${id}/upload-page?${qs.toString()}`,
+    {
+      method: 'POST',
+      headers: { authorization: `Bearer ${t}`, 'content-type': blob.type || 'image/png' },
+      body: await blob.arrayBuffer(),
+    },
+  )
+  const body = await res.json().catch(() => ({}))
+  if (!res.ok)
+    throw new Error((body as { error?: string }).error || `upload page ${pageNumber} failed`)
+  return (body as { url: string }).url
+}
+
 // Submit final translated pages (PNG blobs, in order) back to the website.
 // `masterKhrprojKey` (optional) records the .khrproj master the editor exported.
+// `inpaintedPages` (optional, index-aligned with `pages`) carries the clean
+// (text-removed) background per page; when present its uploaded URL is sent as
+// inpaintedImageUrl so the HTML-overlay reader picks up the reviewer's corrected
+// inpaint (instead of keeping the agent's original). A missing/undefined entry
+// leaves that page's inpaint untouched on the server.
 export async function submitPages(
   id: string,
   pages: Blob[],
   t: string,
   masterKhrprojKey?: string,
+  inpaintedPages?: (Blob | undefined)[],
 ): Promise<any> {
-  const fd = new FormData()
-  pages.forEach((b, i) => fd.append('pages', b, `${i + 1}.png`))
-  if (masterKhrprojKey) fd.append('masterKhrprojKey', masterKhrprojKey)
+  // Upload pages ONE AT A TIME (direct, small requests) instead of bundling all
+  // of them into a single multipart POST — 40+ manga PNGs exceed Cloudflare's
+  // ~100MB request limit and the browser sees "failed to fetch". Then submit
+  // only the resulting URLs as a small JSON body.
+  const uploaded: { pageNumber: number; translatedImageUrl: string; inpaintedImageUrl?: string }[] =
+    new Array(pages.length)
+  const CONCURRENCY = 6
+  let next = 0
+  async function worker() {
+    while (next < pages.length) {
+      const i = next++
+      const blob = pages[i]
+      const pageNumber = i + 1
+      const translatedImageUrl = await uploadOnePage(id, t, pageNumber, blob, `${pageNumber}.png`)
+      const entry: { pageNumber: number; translatedImageUrl: string; inpaintedImageUrl?: string } = {
+        pageNumber,
+        translatedImageUrl,
+      }
+      // Clean (inpaint) background, if the editor exported one for this page.
+      // Best-effort: a failed clean upload must NOT fail the whole submit and must
+      // NOT send a bad URL — leave inpaintedImageUrl unset so the old one is kept.
+      const clean = inpaintedPages?.[i]
+      if (clean) {
+        try {
+          entry.inpaintedImageUrl = await uploadOnePage(
+            id,
+            t,
+            pageNumber,
+            clean,
+            `${pageNumber}-clean.png`,
+          )
+        } catch (e) {
+          console.warn(`inpaint upload page ${pageNumber} skipped:`, e)
+        }
+      }
+      uploaded[i] = entry
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, pages.length) }, worker))
+
   const res = await fetch(`${WEBSITE_API}/api/translator/chapters/${id}/submit`, {
     method: 'POST',
-    headers: { authorization: `Bearer ${t}` },
-    body: fd,
+    headers: { authorization: `Bearer ${t}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ pages: uploaded, masterKhrprojKey }),
   })
   const body = await res.json()
   if (!res.ok) throw new Error(body.error || 'submit failed')

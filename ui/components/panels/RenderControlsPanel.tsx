@@ -147,6 +147,15 @@ export function RenderControlsPanel() {
 
   const sectionRef = useRef<HTMLDivElement>(null)
   const [sectionWidth, setSectionWidth] = useState<number>(0)
+  // Local draft for the font-size input so typing is instant (each keystroke no
+  // longer round-trips applyOp over the editor tunnel). Commit is debounced +
+  // on blur; reset whenever the selection changes so it shows the node's size.
+  const [sizeDraft, setSizeDraft] = useState<string | null>(null)
+  const sizeCommitTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    setSizeDraft(null)
+    if (sizeCommitTimer.current) clearTimeout(sizeCommitTimer.current)
+  }, [selectedNode?.id])
 
   useEffect(() => {
     if (!sectionRef.current) return
@@ -558,6 +567,8 @@ export function RenderControlsPanel() {
             className='size-6 shrink-0 rounded-r-none border-r'
             disabled={!selectedNode}
             onClick={() => {
+              if (sizeCommitTimer.current) clearTimeout(sizeCommitTimer.current)
+              setSizeDraft(null)
               const next = Math.max(6, Math.round((currentFontSize ?? 16) - 1))
               applyStyleToSelected({ fontSize: next })
             }}
@@ -573,12 +584,34 @@ export function RenderControlsPanel() {
             className='h-6 min-w-0 flex-1 [appearance:textfield] rounded-none border-0 px-0.5 text-center text-xs shadow-none focus-visible:ring-0 [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none'
             data-testid='render-font-size'
             disabled={!selectedNode}
-            value={currentFontSize !== undefined ? Math.round(currentFontSize) : ''}
+            value={
+              sizeDraft !== null
+                ? sizeDraft
+                : currentFontSize !== undefined
+                  ? Math.round(currentFontSize)
+                  : ''
+            }
             placeholder='auto'
             onChange={(event) => {
-              const parsed = Number.parseInt(event.target.value, 10)
-              if (!Number.isFinite(parsed) || parsed < 1) return
-              applyStyleToSelected({ fontSize: Math.min(300, parsed) })
+              const raw = event.target.value
+              setSizeDraft(raw) // instant, local
+              if (sizeCommitTimer.current) clearTimeout(sizeCommitTimer.current)
+              sizeCommitTimer.current = setTimeout(() => {
+                const parsed = Number.parseInt(raw, 10)
+                if (Number.isFinite(parsed) && parsed >= 1) {
+                  applyStyleToSelected({ fontSize: Math.min(300, parsed) })
+                }
+              }, 350)
+            }}
+            onBlur={() => {
+              if (sizeCommitTimer.current) clearTimeout(sizeCommitTimer.current)
+              if (sizeDraft !== null) {
+                const parsed = Number.parseInt(sizeDraft, 10)
+                if (Number.isFinite(parsed) && parsed >= 1) {
+                  applyStyleToSelected({ fontSize: Math.min(300, parsed) })
+                }
+                setSizeDraft(null)
+              }
             }}
           />
           <Button
@@ -588,6 +621,8 @@ export function RenderControlsPanel() {
             className='size-6 shrink-0 rounded-l-none border-l'
             disabled={!selectedNode}
             onClick={() => {
+              if (sizeCommitTimer.current) clearTimeout(sizeCommitTimer.current)
+              setSizeDraft(null)
               const next = Math.min(300, Math.round((currentFontSize ?? 16) + 1))
               applyStyleToSelected({ fontSize: next })
             }}

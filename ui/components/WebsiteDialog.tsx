@@ -40,7 +40,7 @@ import {
   saveDraft,
   submitPages,
 } from '@/lib/website'
-import { fetchSceneBlocks } from '@/lib/websiteAgent'
+import { brandBlob, fetchSceneBlocks, fetchSceneJson } from '@/lib/websiteAgent'
 import { useGlossaryStore } from '@/lib/stores/glossaryStore'
 
 const ACTIVE_JOB_KEY = 'website_active_job'
@@ -227,6 +227,26 @@ async function exportRenderedBlobs(pageIds: string[]): Promise<Blob[]> {
   return blobs
 }
 
+// Export ONE page's clean (inpainted, text-removed) background — the same
+// `format: 'inpainted'` export the auto-translate agent uses (websiteAgent.ts).
+// The HTML-overlay reader shows THIS image with the text_blocks on top, so a
+// reviewer who corrects the inpaint needs the corrected clean image published.
+// Best-effort: returns null on any failure so the submit is never blocked and
+// no bad URL is sent (the server then keeps the existing inpaint for that page).
+async function exportInpaintedBlob(pageId: string): Promise<Blob | null> {
+  try {
+    const res = await fetch('/api/v1/projects/current/export', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ format: 'inpainted', pages: [pageId] }),
+    })
+    if (!res.ok) return null
+    return await res.blob()
+  } catch {
+    return null
+  }
+}
+
 // Pull the central SERIES glossary into koharu's GlossaryDialog (active, editable)
 // and load global+type as the read-only context system prompt, so reviewing/
 // re-translating in the editor uses the same terminology as the auto-translate.
@@ -238,13 +258,29 @@ async function syncGlossaryDown(
   try {
     const g = await resolveGlossary(contentId, token)
     const gid = `central:${contentId}`
-    useGlossaryStore.setState((s) => ({
-      glossaries: [
-        ...s.glossaries.filter((x) => x.id !== gid),
-        { id: gid, name: displayName || contentId, entries: g.seriesEntries, notes: g.seriesNotes },
-      ],
-      activeGlossaryId: gid,
-    }))
+    useGlossaryStore.setState((s) => {
+      // Merge the central (PG) series entries with any LOCAL entries already in
+      // the store. The local copy may hold additions the user has not Submitted
+      // yet (sync-up only runs on Submit), and a plain overwrite here discarded
+      // them on every chapter reopen — the "added 20, only ~10 come back" bug.
+      // Union by source; local wins on conflict (it's the user's latest edit).
+      const existing = s.glossaries.find((x) => x.id === gid)
+      const bySource = new Map<string, { source: string; target: string }>()
+      for (const e of g.seriesEntries) bySource.set(e.source, e)
+      for (const e of existing?.entries ?? []) if (e.source.trim()) bySource.set(e.source, e)
+      return {
+        glossaries: [
+          ...s.glossaries.filter((x) => x.id !== gid),
+          {
+            id: gid,
+            name: displayName || contentId,
+            entries: [...bySource.values()],
+            notes: existing?.notes || g.seriesNotes,
+          },
+        ],
+        activeGlossaryId: gid,
+      }
+    })
     usePreferencesStore.getState().setCustomSystemPrompt(g.contextPrompt ?? undefined)
   } catch (e) {
     console.warn('glossary sync-down failed:', e)
@@ -272,8 +308,11 @@ async function buildDraftPages(pageIds: string[]) {
     pageWidth: number
     pageHeight: number
   }[] = []
+  // Fetch the scene ONCE and reuse it for every page — re-downloading the whole
+  // scene per page made draft-save ("กำลังบันทึกข้อความ") slow over the tunnel.
+  const scene = await fetchSceneJson()
   for (let i = 0; i < pageIds.length; i++) {
-    const { textBlocks, width, height } = await fetchSceneBlocks(pageIds[i])
+    const { textBlocks, width, height } = await fetchSceneBlocks(pageIds[i], scene)
     pages.push({ pageNumber: i + 1, textBlocks, pageWidth: width, pageHeight: height })
   }
   return pages
@@ -569,26 +608,52 @@ export function WebsiteDialog({
     const total = activeJob.pageIds.length
     setBusy(true)
     try {
+      // 0. Guard against submitting a STALE/RAW project. After an editor
+      //    idle-kill or cold resume the open koharu project can silently revert
+      //    to the freshly-imported RAW master; submitting then overwrites the
+      //    user's edits with raw text (the ch58 lost-edit case). Verify the open
+      //    scene still contains the pages we're reviewing, and abort loudly if not.
+      setMsg('กำลังตรวจสอบโปรเจกต์...')
+      const sceneNow = await (await fetch('/api/v1/scene.json')).json()
+      const scenePageIds = Object.keys(sceneNow?.scene?.pages ?? sceneNow?.pages ?? {})
+      const missing = activeJob.pageIds.filter((id) => !scenePageIds.includes(id))
+      if (missing.length) {
+        throw new Error(
+          `⚠️ โปรเจกต์ที่เปิดอยู่ไม่ตรงกับงานนี้ (${missing.length}/${activeJob.pageIds.length} หน้าหาย — น่าจะถูกรีโหลด/idle) — กรุณาเปิดงานนี้ใหม่จากเว็บแล้วแก้อีกครั้งก่อน Submit เพื่อกันงานแก้หาย`,
+        )
+      }
+
       // 1. Render so the rendered layer + text sprites are current.
       setMsg('กำลังเรนเดอร์ทุกหน้า...')
       await renderAllPages(activeJob.pageIds)
 
       // 2. Save text blocks so manga (HTML overlay) reflects the edits, not just
       //    the baked raster (the web keeps the overlay; clearOverlay is off).
+      //    Fail LOUD: a swallowed error here previously let submit proceed with
+      //    RAW/stale text. If the edited text can't be saved, abort the submit.
       setMsg('กำลังบันทึกข้อความ...')
-      try {
-        const draftPages = await buildDraftPages(activeJob.pageIds)
-        await saveDraft(activeJob.chapterId, draftPages, token)
-      } catch (e) {
-        console.warn('textblock save before submit failed:', e)
-      }
+      const draftPages = await buildDraftPages(activeJob.pageIds)
+      await saveDraft(activeJob.chapterId, draftPages, token)
 
-      // 3. Export + upload rendered pages with per-page progress (G).
+      // 3. Export + upload rendered pages with per-page progress (G). Bake the
+      //    "manga-th.net" watermark into each page first (parity with the agent —
+      //    manual-review submits were going up un-watermarked).
+      //
+      //    ALSO export the clean (inpainted) background per page — same as the
+      //    agent — so a reviewer who corrected the inpaint publishes that fix to
+      //    the HTML-overlay reader (which renders inpainted_image_url + text_blocks).
+      //    The clean image is watermarked too (the reader shows IT, not the
+      //    rendered raster). Per-page inpaint export is best-effort: a failure
+      //    leaves that page's entry undefined so submitPages keeps the old inpaint.
       const blobs: Blob[] = []
+      const inpaintedBlobs: (Blob | undefined)[] = []
       for (let i = 0; i < activeJob.pageIds.length; i++) {
         setMsg(`กำลังอัปโหลด หน้า ${i + 1}/${total}...`)
+        const corner = usePreferencesStore.getState().watermarkCorner
         const [b] = await exportRenderedBlobs([activeJob.pageIds[i]])
-        blobs.push(b)
+        blobs.push(await brandBlob(b, corner))
+        const clean = await exportInpaintedBlob(activeJob.pageIds[i])
+        inpaintedBlobs.push(clean ? await brandBlob(clean, corner) : undefined)
       }
 
       // 3.5 Export the edited project as the chapter's .khrproj master so the
@@ -605,7 +670,13 @@ export function WebsiteDialog({
       }
 
       setMsg('กำลังส่งให้แอดมินตรวจ...')
-      const res = await submitPages(activeJob.chapterId, blobs, token, masterKhrprojKey)
+      const res = await submitPages(
+        activeJob.chapterId,
+        blobs,
+        token,
+        masterKhrprojKey,
+        inpaintedBlobs,
+      )
       // Push any glossary edits back to the central store (live for next translate).
       if (activeJob.contentId) await syncGlossaryUp(activeJob.contentId, token)
 
@@ -628,8 +699,34 @@ export function WebsiteDialog({
     }
   }, [token, activeJob])
 
+  // Eager-push the series glossary when the dialog CLOSES without submitting.
+  // The native SettingsDialog glossary panel only reaches PG via syncGlossaryUp
+  // on a successful Submit; a reviewer who adds terms while reviewing and then
+  // just closes the dialog (no Submit) would otherwise lose those additions for
+  // the next auto-translate. Skip when a submit just succeeded (it already
+  // pushed) and when we never had an active series content / token.
+  const handleOpenChange = useCallback(
+    (v: boolean) => {
+      if (!v && !submittedRef.current && token) {
+        const contentId = activeJob?.contentId
+        if (contentId) {
+          const gid = `central:${contentId}`
+          const hasGlossary = useGlossaryStore
+            .getState()
+            .glossaries.some((g) => g.id === gid)
+          if (hasGlossary) {
+            // Fire-and-forget; never block the close on the network call.
+            void syncGlossaryUp(contentId, token)
+          }
+        }
+      }
+      onOpenChange(v)
+    },
+    [activeJob, token, onOpenChange],
+  )
+
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className='max-w-2xl'>
         <DialogHeader>
           <DialogTitle>Website — translation jobs</DialogTitle>
