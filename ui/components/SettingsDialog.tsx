@@ -52,6 +52,7 @@ import { Input } from '@/components/ui/input'
 import { Kbd } from '@/components/ui/kbd'
 import { Label } from '@/components/ui/label'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { Switch } from '@/components/ui/switch'
 import {
   Select,
   SelectContent,
@@ -715,6 +716,10 @@ function TranslationPane() {
   const setWatermarkCorner = usePreferencesStore((s) => s.setWatermarkCorner)
   const agentPageConcurrency = usePreferencesStore((s) => s.agentPageConcurrency)
   const setAgentPageConcurrency = usePreferencesStore((s) => s.setAgentPageConcurrency)
+  const agentStagePipeline = usePreferencesStore((s) => s.agentStagePipeline)
+  const setAgentStagePipeline = usePreferencesStore((s) => s.setAgentStagePipeline)
+  const agentLlmConcurrency = usePreferencesStore((s) => s.agentLlmConcurrency)
+  const setAgentLlmConcurrency = usePreferencesStore((s) => s.setAgentLlmConcurrency)
 
   return (
     <div className='space-y-6'>
@@ -784,20 +789,61 @@ function TranslationPane() {
             'How many pages the auto-translate agent processes at once. A single page does not saturate the GPU, so 2-3 is much faster. Raise only if you have spare VRAM; 1 = sequential.',
         })}
       >
-        <div className='space-y-1.5'>
-          <Label className='text-xs'>
-            {t('settings.agentPageConcurrency', { defaultValue: 'Pages in parallel' })}
-          </Label>
-          <Input
-            type='number'
-            min='1'
-            max='6'
-            step='1'
-            inputMode='numeric'
-            className='w-24'
-            value={agentPageConcurrency}
-            onChange={(e) => setAgentPageConcurrency(Number.parseInt(e.target.value, 10) || 1)}
-          />
+        <div className='space-y-4'>
+          <div className='space-y-1.5'>
+            <Label className='text-xs'>
+              {t('settings.agentPageConcurrency', { defaultValue: 'Pages in parallel' })}
+            </Label>
+            <Input
+              type='number'
+              min='1'
+              max='6'
+              step='1'
+              inputMode='numeric'
+              className='w-24'
+              value={agentPageConcurrency}
+              onChange={(e) => setAgentPageConcurrency(Number.parseInt(e.target.value, 10) || 1)}
+            />
+          </div>
+
+          <div className='flex items-start justify-between gap-4'>
+            <div className='space-y-0.5'>
+              <Label className='text-xs'>
+                {t('settings.agentStagePipeline', { defaultValue: 'Assembly-line mode' })}
+              </Label>
+              <p className='text-muted-foreground text-xs'>
+                {t('settings.agentStagePipelineHint', {
+                  defaultValue:
+                    'Run detection, translation and inpainting on DIFFERENT pages at the same time, so this GPU and the remote LLM never wait for each other. Off = one worker takes a page through all steps.',
+                })}
+              </p>
+            </div>
+            <Switch checked={agentStagePipeline} onCheckedChange={setAgentStagePipeline} />
+          </div>
+
+          {agentStagePipeline ? (
+            <div className='space-y-1.5'>
+              <Label className='text-xs'>
+                {t('settings.agentLlmConcurrency', { defaultValue: 'Pages translating at once' })}
+              </Label>
+              <Input
+                type='number'
+                min='1'
+                max='4'
+                step='1'
+                inputMode='numeric'
+                className='w-24'
+                value={agentLlmConcurrency}
+                onChange={(e) => setAgentLlmConcurrency(Number.parseInt(e.target.value, 10) || 1)}
+              />
+              <p className='text-muted-foreground text-xs'>
+                {t('settings.agentLlmConcurrencyHint', {
+                  defaultValue:
+                    'Higher finishes sooner but each page then sees less of the chapter already translated, so names and terms drift apart. 2 keeps almost all the speed.',
+                })}
+              </p>
+            </div>
+          ) : null}
         </div>
       </Section>
 

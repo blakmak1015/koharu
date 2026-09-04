@@ -449,17 +449,47 @@ async function ensureLlmLoaded(): Promise<boolean> {
   }
 }
 
+/**
+ * Bounds how many pages may occupy one station of the assembly line. Permits
+ * are handed straight from a releaser to the next waiter, so the count can
+ * never drift.
+ */
+class Semaphore {
+  private free: number
+  private waiters: (() => void)[] = []
+  constructor(limit: number) {
+    this.free = Math.max(1, limit)
+  }
+  async acquire(): Promise<() => void> {
+    if (this.free > 0) this.free--
+    else await new Promise<void>((resolve) => this.waiters.push(resolve))
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      const next = this.waiters.shift()
+      if (next) next()
+      else this.free++
+    }
+  }
+}
+
 // --- main loop --------------------------------------------------------------
 
-async function processOneJob(): Promise<boolean> {
-  // 0. The agent must translate through the provider LLM. Check BEFORE
-  //    claiming: if the provider is down we simply idle instead of claiming a
-  //    job and then failing it (or, worse, translating it with a local model).
-  if (!(await ensureLlmLoaded())) return false
+type ClaimedJob = Extract<ClaimResponse, { claimed: true }>
+type PrefetchedJob = { claim: ClaimedJob; files: File[]; remaining: AgentPage[] }
 
-  // 1. Claim
-  setState({ status: 'polling' })
-  appendLog('Polling for jobs...')
+/**
+ * Next chapter, claimed and downloaded while the current one is still being
+ * exported and submitted — that tail is ~30-60s during which nothing
+ * translates. koharu can hold only ONE open project, so this prefetches the
+ * BYTES only; the project switch still happens after the current one closes.
+ * If the agent stops while holding this, the lease simply expires and the job
+ * goes back to the queue.
+ */
+let _prefetch: Promise<PrefetchedJob | null> | null = null
+
+async function claimJob(): Promise<ClaimResponse> {
   const claimRes = await agentFetch('/api/admin/translation/agent/claim', {
     method: 'POST',
   }, 45_000)
@@ -469,14 +499,66 @@ async function processOneJob(): Promise<boolean> {
   // Read as text first so a malformed/empty body produces a useful log instead
   // of a bare "Unexpected end of JSON" — and so we can see WHAT came back.
   const rawClaim = await claimRes.text()
-  let claim: ClaimResponse
   try {
-    claim = JSON.parse(rawClaim)
+    return JSON.parse(rawClaim) as ClaimResponse
   } catch (e) {
     appendLog(
       `Claim response was not valid JSON (${rawClaim.length} bytes): ${rawClaim.slice(0, 300)}`,
     )
     throw new Error(`claim response not JSON: ${(e as Error).message}`)
+  }
+}
+
+async function downloadPages(pages: AgentPage[]): Promise<File[]> {
+  const files: File[] = []
+  for (const page of pages) {
+    if (_abortController?.signal.aborted) throw new Error('Agent stopped')
+    const url = page.imageUrl.startsWith('http') ? page.imageUrl : `${WEBSITE_API}${page.imageUrl}`
+    const res = await fetchDeadline(url, {}, 90_000, 3)
+    if (!res.ok) throw new Error(`Failed to download page ${page.pageNumber}: ${res.status}`)
+    const blob = await res.blob()
+    files.push(new File([blob], `${page.pageNumber}.png`, { type: blob.type || 'image/png' }))
+  }
+  return files
+}
+
+function remainingPages(claim: ClaimedJob): AgentPage[] {
+  const done = new Set(claim.donePageNumbers ?? [])
+  return claim.pages.filter((pg) => !done.has(pg.pageNumber))
+}
+
+async function prefetchNextJob(): Promise<PrefetchedJob | null> {
+  try {
+    const claim = await claimJob()
+    if (!claim.claimed) return null
+    const remaining = remainingPages(claim)
+    const files = await downloadPages(remaining)
+    await sendHeartbeat(claim.job.id)
+    appendLog(`Prefetched next job ${claim.job.id} (${files.length} page(s) ready)`)
+    return { claim, files, remaining }
+  } catch (e) {
+    appendLog(`Prefetch skipped: ${(e as Error).message}`)
+    return null
+  }
+}
+
+async function processOneJob(): Promise<boolean> {
+  // 0. The agent must translate through the provider LLM. Check BEFORE
+  //    claiming: if the provider is down we simply idle instead of claiming a
+  //    job and then failing it (or, worse, translating it with a local model).
+  if (!(await ensureLlmLoaded())) return false
+
+  // 1. Claim — or pick up the chapter prefetched while the last one finished.
+  setState({ status: 'polling' })
+  const pre = _prefetch ? await _prefetch.catch(() => null) : null
+  _prefetch = null
+  let claim: ClaimResponse
+  if (pre) {
+    claim = pre.claim
+    appendLog(`Using prefetched job ${pre.claim.job.id}`)
+  } else {
+    appendLog('Polling for jobs...')
+    claim = await claimJob()
   }
   if (!claim.claimed) {
     appendLog(`No jobs available (${claim.reason}), waiting...`)
@@ -503,17 +585,18 @@ async function processOneJob(): Promise<boolean> {
     if (donePages.size) {
       appendLog(`Resuming: ${donePages.size} page(s) already done, ${remaining.length} remaining`)
     }
-    appendLog('Downloading source pages...')
-    const files: File[] = []
-    for (const page of remaining) {
-      if (_abortController?.signal.aborted) throw new Error('Agent stopped')
-      const url = page.imageUrl.startsWith('http') ? page.imageUrl : `${WEBSITE_API}${page.imageUrl}`
-      const res = await fetchDeadline(url, {}, 90_000, 3)
-      if (!res.ok) throw new Error(`Failed to download page ${page.pageNumber}: ${res.status}`)
-      const blob = await res.blob()
-      files.push(new File([blob], `${page.pageNumber}.png`, { type: blob.type || 'image/png' }))
+    // The prefetched bytes are only usable if the page set still matches —
+    // pages can be completed between the prefetch and now.
+    let files: File[]
+    if (pre && pre.files.length === remaining.length) {
+      files = pre.files
+      appendLog(`Reusing ${files.length} prefetched page(s)`)
+    } else {
+      if (pre) appendLog('Prefetched pages no longer match the job — downloading again')
+      appendLog('Downloading source pages...')
+      files = await downloadPages(remaining)
+      appendLog(`Downloaded ${files.length} page(s)`)
     }
-    appendLog(`Downloaded ${files.length} page(s)`)
 
     type CompletePage = {
       pageNumber: number
@@ -562,7 +645,31 @@ async function processOneJob(): Promise<boolean> {
       //    that weren't done yet (order no longer matters). Concurrency is
       //    configurable (prefs.agentPageConcurrency; 1 = old sequential behavior).
       setState({ status: 'processing' })
-      const pageConcurrency = Math.max(1, prefs.agentPageConcurrency || 1)
+      // Assembly line: split the 8 steps into stations so this machine and the
+      // LLM box work on DIFFERENT pages at the same time instead of taking
+      // turns. `inpaint` (lama) only needs the detector masks — NOT the
+      // translations — so it is its own station that runs alongside translate.
+      const stages =
+        prefs.agentStagePipeline && p.translator && p.inpainter && p.renderer
+          ? {
+              detect: [p.detector, p.bubble_segmenter, p.segmenter, p.font_detector, p.ocr].filter(
+                (x): x is string => !!x,
+              ),
+              translate: [p.translator],
+              inpaint: [p.inpainter],
+              render: [p.renderer],
+            }
+          : null
+      const localLimit = Math.max(1, prefs.agentPageConcurrency || 1)
+      const llmLimit = Math.max(1, prefs.agentLlmConcurrency || 2)
+      const localGate = new Semaphore(localLimit)
+      const llmGate = new Semaphore(llmLimit)
+      // A page waiting on the remote LLM must not hold a local slot, so run
+      // extra page workers — the GATES bound each machine, not the pool size.
+      const pageConcurrency = stages ? localLimit + llmLimit : localLimit
+      if (stages) {
+        appendLog(`Assembly line: ${localLimit} local + ${llmLimit} translating, ${pageConcurrency} pages in flight`)
+      }
       let nextPageIdx = 0
       const processOnePage = async (): Promise<void> => {
         for (;;) {
@@ -572,9 +679,9 @@ async function processOneJob(): Promise<boolean> {
           const pageId = pageIds[i]
           const pageNumber = remaining[i]?.pageNumber ?? i + 1
           appendLog(`Translating page ${pageNumber} (${i + 1}/${remaining.length})...`)
-          const runPipeline = async (): Promise<JobOutcome> => {
+          const runSteps = async (stepIds: string[]): Promise<JobOutcome> => {
             const { operationId } = await startPipeline({
-              steps,
+              steps: stepIds,
               pages: [pageId],
               targetLanguage: job.targetLanguage || undefined,
               defaultFont: prefs.defaultFont,
@@ -582,20 +689,41 @@ async function processOneJob(): Promise<boolean> {
             })
             return waitForJob(operationId)
           }
-          let outcome = await runPipeline()
-          if (outcome.status === 'completed_with_errors') {
-            // A failed step makes koharu SKIP that page's remaining steps, so
-            // the page is incomplete (untranslated, or with the source text
-            // left showing). These are usually transient, so retry once — then
-            // fail loudly rather than publishing a broken page.
-            const why = outcome.warnings.join('; ') || 'no detail reported'
-            appendLog(`Page ${pageNumber}: pipeline step failed (${why}) — retrying once`)
-            outcome = await runPipeline()
-            if (outcome.status === 'completed_with_errors') {
-              throw new Error(
-                `Page ${pageNumber} failed twice: ${outcome.warnings.join('; ') || why}`,
-              )
+          // One station, holding its machine's gate for exactly as long as it
+          // runs. A failed step makes koharu SKIP that page's remaining steps,
+          // so the page is incomplete (untranslated, or with the source text
+          // left showing). Almost always transient — retry once, then fail
+          // loudly rather than publishing a broken page.
+          const runStage = async (label: string, stepIds: string[], gate: Semaphore) => {
+            const release = await gate.acquire()
+            try {
+              let outcome = await runSteps(stepIds)
+              if (outcome.status === 'completed_with_errors') {
+                const why = outcome.warnings.join('; ') || 'no detail reported'
+                appendLog(`Page ${pageNumber} [${label}]: step failed (${why}) — retrying once`)
+                outcome = await runSteps(stepIds)
+                if (outcome.status === 'completed_with_errors') {
+                  throw new Error(
+                    `Page ${pageNumber} [${label}] failed twice: ${outcome.warnings.join('; ') || why}`,
+                  )
+                }
+              }
+            } finally {
+              release()
             }
+          }
+          if (stages) {
+            await runStage('detect', stages.detect, localGate)
+            await sendHeartbeat(job.id)
+            // Neither of these needs the other's output, and they run on
+            // different machines, so the page does both at once.
+            await Promise.all([
+              runStage('translate', stages.translate, llmGate),
+              runStage('inpaint', stages.inpaint, localGate),
+            ])
+            await runStage('render', stages.render, localGate)
+          } else {
+            await runStage('pipeline', steps, localGate)
           }
           await sendHeartbeat(job.id)
 
@@ -643,6 +771,13 @@ async function processOneJob(): Promise<boolean> {
       await Promise.all(
         Array.from({ length: Math.min(pageConcurrency, pageIds.length) }, processOnePage),
       )
+
+      // Every page is rendered, but the master export + complete below still
+      // take ~30-60s with nothing translating. Start claiming and downloading
+      // the NEXT chapter now so that gap is spent usefully.
+      if (prefs.agentStagePipeline && !_prefetch) {
+        _prefetch = prefetchNextJob()
+      }
 
       // 5.5 Export the full koharu project as the .khrproj master to R2 — ONLY
       // on a clean full run (no pages were pre-done in a prior interrupted run),

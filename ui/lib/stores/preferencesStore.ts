@@ -20,6 +20,16 @@ type PreferencesState = {
    *  Higher fills GPU idle gaps (a single page doesn't saturate the GPU). */
   agentPageConcurrency: number
   setAgentPageConcurrency: (n: number) => void
+  /** Run the agent as a staged assembly line instead of one worker per page
+   *  doing all 8 steps. Lets the local GPU steps and the remote LLM step run
+   *  on DIFFERENT pages at the same time instead of taking turns. */
+  agentStagePipeline: boolean
+  setAgentStagePipeline: (on: boolean) => void
+  /** Pages allowed in the remote-LLM stage at once. Higher is faster but each
+   *  page then sees less of the chapter's translation memory (names/terms
+   *  drift), and the shared KV cache on the LLM box fills up. */
+  agentLlmConcurrency: number
+  setAgentLlmConcurrency: (n: number) => void
   favoriteFonts: string[]
   toggleFavoriteFont: (font: string) => void
   customSystemPrompt?: string
@@ -52,6 +62,8 @@ const initialPreferences = {
   favoriteFonts: [],
   watermarkCorner: 'top-right' as const,
   agentPageConcurrency: 2,
+  agentStagePipeline: false,
+  agentLlmConcurrency: 2,
   shortcuts: {
     select: 'V',
     block: 'M',
@@ -83,6 +95,9 @@ export const usePreferencesStore = create<PreferencesState>()(
       setWatermarkCorner: (corner) => set({ watermarkCorner: corner }),
       setAgentPageConcurrency: (n) =>
         set({ agentPageConcurrency: Math.max(1, Math.min(6, Math.floor(n) || 1)) }),
+      setAgentStagePipeline: (on) => set({ agentStagePipeline: !!on }),
+      setAgentLlmConcurrency: (n) =>
+        set({ agentLlmConcurrency: Math.max(1, Math.min(4, Math.floor(n) || 1)) }),
       toggleFavoriteFont: (font) =>
         set((state) => ({
           favoriteFonts: state.favoriteFonts.includes(font)
@@ -148,6 +163,8 @@ export const usePreferencesStore = create<PreferencesState>()(
         defaultFont: state.defaultFont,
         watermarkCorner: state.watermarkCorner,
         agentPageConcurrency: state.agentPageConcurrency,
+        agentStagePipeline: state.agentStagePipeline,
+        agentLlmConcurrency: state.agentLlmConcurrency,
         favoriteFonts: state.favoriteFonts,
         customSystemPrompt: state.customSystemPrompt,
         codexImagePrompt: state.codexImagePrompt,
