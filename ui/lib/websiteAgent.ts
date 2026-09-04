@@ -157,18 +157,53 @@ async function agentFetch(
   return fetchDeadline(`${WEBSITE_API}${path}`, { ...init, headers }, timeoutMs, attempts)
 }
 
-async function waitForJob(jobId: string, timeoutMs = 2_700_000): Promise<void> {
+type JobOutcome = { status: 'completed' | 'completed_with_errors'; warnings: string[] }
+
+/** koharu's own view of one operation, used when the SSE stream misses an event. */
+async function pollOperationStatus(jobId: string): Promise<string | undefined> {
+  try {
+    const res = await fetchDeadline('/api/v1/operations', {}, 15_000)
+    if (!res.ok) return undefined
+    const body = (await res.json()) as { operations?: { id: string; status: string }[] }
+    return body.operations?.find((o) => o.id === jobId)?.status
+  } catch {
+    return undefined
+  }
+}
+
+// Wait for one pipeline operation to reach a TERMINAL state. koharu has five
+// statuses, not two: running / completed / completed_with_errors / cancelled /
+// failed. This used to check only completed and failed, so a page that ended
+// in completed_with_errors (a step failed) or cancelled parked the worker here
+// for the full timeout with koharu already idle — the "hangs after one
+// chapter" report. All four terminal states are handled now.
+async function waitForJob(jobId: string, timeoutMs = 600_000): Promise<JobOutcome> {
   const start = Date.now()
-  while (Date.now() - start < timeoutMs) {
+  let lastPoll = 0
+  for (;;) {
     if (_abortController?.signal.aborted) throw new Error('Agent stopped')
     const job = useJobsStore.getState().jobs[jobId]
-    if (job?.status === 'completed') return
-    if (job?.status === 'failed') {
-      throw new Error(job.error ?? 'Pipeline failed')
+    let status: string | undefined = job?.status
+    // The store is fed by the webview's SSE stream. If that stream drops or
+    // reconnects, the terminal event never lands — so ask koharu directly.
+    if ((!status || status === 'running') && Date.now() - lastPoll > 15_000) {
+      lastPoll = Date.now()
+      status = (await pollOperationStatus(jobId)) ?? status
     }
+    if (status === 'completed' || status === 'completed_with_errors') {
+      return {
+        status,
+        warnings: (job?.warnings ?? []).map(
+          (w) => `${w.stepId} p${w.pageIndex + 1}: ${w.message}`,
+        ),
+      }
+    }
+    if (status === 'failed' || status === 'cancelled') {
+      throw new Error(job?.error ?? `Pipeline ${status}`)
+    }
+    if (Date.now() - start >= timeoutMs) throw new Error('Pipeline timed out')
     await new Promise((r) => setTimeout(r, 1000))
   }
-  throw new Error('Pipeline timed out')
 }
 
 async function sendHeartbeat(jobId: string): Promise<void> {
@@ -537,14 +572,31 @@ async function processOneJob(): Promise<boolean> {
           const pageId = pageIds[i]
           const pageNumber = remaining[i]?.pageNumber ?? i + 1
           appendLog(`Translating page ${pageNumber} (${i + 1}/${remaining.length})...`)
-          const { operationId } = await startPipeline({
-            steps,
-            pages: [pageId],
-            targetLanguage: job.targetLanguage || undefined,
-            defaultFont: prefs.defaultFont,
-            systemPrompt: claim.systemPrompt ?? undefined,
-          })
-          await waitForJob(operationId)
+          const runPipeline = async (): Promise<JobOutcome> => {
+            const { operationId } = await startPipeline({
+              steps,
+              pages: [pageId],
+              targetLanguage: job.targetLanguage || undefined,
+              defaultFont: prefs.defaultFont,
+              systemPrompt: claim.systemPrompt ?? undefined,
+            })
+            return waitForJob(operationId)
+          }
+          let outcome = await runPipeline()
+          if (outcome.status === 'completed_with_errors') {
+            // A failed step makes koharu SKIP that page's remaining steps, so
+            // the page is incomplete (untranslated, or with the source text
+            // left showing). These are usually transient, so retry once — then
+            // fail loudly rather than publishing a broken page.
+            const why = outcome.warnings.join('; ') || 'no detail reported'
+            appendLog(`Page ${pageNumber}: pipeline step failed (${why}) — retrying once`)
+            outcome = await runPipeline()
+            if (outcome.status === 'completed_with_errors') {
+              throw new Error(
+                `Page ${pageNumber} failed twice: ${outcome.warnings.join('; ') || why}`,
+              )
+            }
+          }
           await sendHeartbeat(job.id)
 
           // Rendered page -> bake watermark -> upload.
