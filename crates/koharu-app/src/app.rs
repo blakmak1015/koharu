@@ -139,6 +139,26 @@ pub fn run(context: tauri::Context<CefRuntime>) -> Result<()> {
             application.manage(koharu_desktop::Desktop::new()?);
             application.manage(AgentState::new(handle.clone())?);
 
+            // Fork: a loopback control surface for the unattended translation
+            // farm. Upstream speaks only Tauri IPC, which the supervising
+            // scripts cannot reach, and they must be able to pin the
+            // translation model after every restart.
+            let readiness = koharu_control::Readiness::new();
+            match koharu_control::configured_port() {
+                Ok(Some(port)) => {
+                    let readiness = readiness.clone();
+                    drop(tauri::async_runtime::spawn(async move {
+                        if let Err(error) = koharu_control::serve(port, readiness).await {
+                            tracing::error!(%error, "the control surface stopped");
+                        }
+                    }));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::error!(%error, "the control surface is disabled");
+                }
+            }
+
             let window_config = application
                 .config()
                 .app
@@ -149,16 +169,26 @@ pub fn run(context: tauri::Context<CefRuntime>) -> Result<()> {
             let window = tauri::WebviewWindowBuilder::from_config(application, window_config)?
                 .build()
                 .context("failed to create the main window")?;
-            window.show().context("failed to show the main window")?;
-            window
-                .set_focus()
-                .context("failed to focus the main window")?;
+            // Fork: the farm instance starts hidden. The webview still loads, so
+            // the auto-started translation agent runs; re-launching the
+            // executable brings the window back.
+            if background_mode() {
+                tracing::info!("background mode: starting with the window hidden");
+            } else {
+                window.show().context("failed to show the main window")?;
+                window
+                    .set_focus()
+                    .context("failed to focus the main window")?;
+            }
+
             let initialization_handle = handle.clone();
+            let initialization_readiness = readiness.clone();
             drop(tauri::async_runtime::spawn(async move {
                 initialize(initialization_handle.clone())
                     .await
                     .expect("failed to initialize the desktop runtime");
                 initialization_handle.state::<Initialization>().ready();
+                initialization_readiness.mark_ready();
             }));
 
             let mut downloads = koharu_runtime::download::subscribe();
@@ -257,17 +287,21 @@ pub fn run(context: tauri::Context<CefRuntime>) -> Result<()> {
             Ok(())
         })
         .on_window_event(|window, event| {
+            // Fork: in background mode closing only hides the window, so a stray
+            // click cannot end a running batch. Interactive use keeps upstream's
+            // behaviour, where closing the window shuts the application down.
+            if let WindowEvent::CloseRequested { api, .. } = event
+                && background_mode()
+            {
+                let _ = window.hide();
+                api.prevent_close();
+                return;
+            }
             if matches!(
                 event,
                 WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed
             ) {
-                let processing = window.state::<Processing>();
-                for stop in processing.stops.lock().values() {
-                    stop.stop();
-                }
-                processing.stops.lock().clear();
-                processing.jobs.lock().clear();
-                window.state::<AgentState>().cancel_all();
+                stop_work(window);
             }
             if matches!(event, WindowEvent::Destroyed) {
                 tracing::info!(
@@ -280,4 +314,30 @@ pub fn run(context: tauri::Context<CefRuntime>) -> Result<()> {
         })
         .run(context)?;
     Ok(())
+}
+
+/// Background mode: the unattended translation-farm instance.
+///
+/// Set by `ops/restart-server.ps1`. In this mode the window starts hidden and
+/// closing it only hides it again, so a stray click cannot end a running batch.
+/// Re-launching the executable brings the window back through
+/// `tauri_plugin_single_instance`; the supervisor script stops the process.
+///
+/// Tauri 3.0.0-alpha.1's `tray-icon` feature requires `tray-icon ^0.25`, which
+/// is not published, so the 0.59.2 fork's tray menu has no equivalent here yet.
+/// Revisit when that dependency lands.
+fn background_mode() -> bool {
+    std::env::var("KOHARU_TRAY_START").is_ok_and(|value| value.trim() == "1")
+}
+
+/// Stop everything the window owns. Hiding to the background deliberately does
+/// not call this: the point of background mode is that the work continues.
+fn stop_work(window: &tauri::Window<CefRuntime>) {
+    let processing = window.state::<Processing>();
+    for stop in processing.stops.lock().values() {
+        stop.stop();
+    }
+    processing.stops.lock().clear();
+    processing.jobs.lock().clear();
+    window.state::<AgentState>().cancel_all();
 }

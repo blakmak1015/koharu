@@ -22,6 +22,7 @@ publish = false
 koharu-app = { path = "crates/koharu-app" }
 koharu-bindgen = { path = "crates/koharu-bindgen" }
 koharu-config = { path = "crates/koharu-config" }
+koharu-control = { path = "crates/koharu-control" }
 koharu-storage = { path = "crates/koharu-storage" }
 koharu-scene = { path = "crates/koharu-scene" }
 koharu-diffusion = { path = "crates/koharu-diffusion" }
