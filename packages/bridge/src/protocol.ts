@@ -110,7 +110,7 @@ export const commands = {
 	 *  Store this instance's agent credentials, and return what is now in effect.
 	 * 
 	 *  An omitted field is left alone and an empty one is cleared, so the panel can
-	 *  change the token without restating the id.
+	 *  change the id without restating the token.
 	 */
 	farmSetAgentCredentials: (token: string | null, agentId: string | null) => __TAURI_INVOKE<AgentCredentials>("farm_set_agent_credentials", { token, agentId }),
 	/**  Forget this instance's agent credentials. */
@@ -125,17 +125,25 @@ export type Account = {
 };
 
 /**
- *  What the translation agent presents to the website.
+ *  What the agent presents to the website.
  * 
- *  Two values, not one: the website authenticates the worker with
- *  `x-translation-agent-token` and attributes the claim with
- *  `x-translation-agent-id`, so a job claimed by one machine is visible as
- *  that machine's.
+ *  Stored by `koharu-control`, which also lets the supervisor pin it over the
+ *  loopback surface — the farm instance starts with its window hidden, so
+ *  there is nowhere for anyone to type a token in.
  */
 export type AgentCredentials = {
 	/**  `None` when this instance has never been given a token. */
 	token: string | null,
 	agentId: string,
+	/**
+	 *  Whether this instance is the unattended one.
+	 * 
+	 *  It decides whether the agent starts on its own. A stored "enabled"
+	 *  flag cannot: the farm instance has no visible window, so nobody can
+	 *  ever set it there in the first place. Having a token and no window is
+	 *  what being the farm means.
+	 */
+	unattended: boolean,
 };
 
 export type AgentStatus = {

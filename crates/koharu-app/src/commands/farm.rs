@@ -218,6 +218,13 @@ pub(crate) struct AgentCredentials {
     /// `None` when this instance has never been given a token.
     token: Option<String>,
     agent_id: String,
+    /// Whether this instance is the unattended one.
+    ///
+    /// It decides whether the agent starts on its own. A stored "enabled"
+    /// flag cannot: the farm instance has no visible window, so nobody can
+    /// ever set it there in the first place. Having a token and no window is
+    /// what being the farm means.
+    unattended: bool,
 }
 
 impl From<koharu_control::credentials::Credentials> for AgentCredentials {
@@ -225,6 +232,7 @@ impl From<koharu_control::credentials::Credentials> for AgentCredentials {
         Self {
             token: value.token,
             agent_id: value.agent_id,
+            unattended: crate::app::background_mode(),
         }
     }
 }

@@ -326,7 +326,7 @@ pub fn run(context: tauri::Context<CefRuntime>) -> Result<()> {
 /// Tauri 3.0.0-alpha.1's `tray-icon` feature requires `tray-icon ^0.25`, which
 /// is not published, so the 0.59.2 fork's tray menu has no equivalent here yet.
 /// Revisit when that dependency lands.
-fn background_mode() -> bool {
+pub(crate) fn background_mode() -> bool {
     std::env::var("KOHARU_TRAY_START").is_ok_and(|value| value.trim() == "1")
 }
 

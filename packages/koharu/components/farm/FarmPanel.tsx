@@ -61,9 +61,13 @@ export function FarmPanel() {
       .then((credentials) => {
         setAgentId(credentials.agentId)
         setHasToken(Boolean(credentials.token))
-        // Auto-start only with a token: without one every claim fails and the
-        // log fills with the same error for as long as the machine is up.
-        if (credentials.token && loadAgentEnabled() && !isAgentRunning()) startAgent(stored)
+        // The unattended instance starts on its own. It has no visible window,
+        // so the stored flag can never be set there — a token and no window is
+        // what being the farm means. A token is required either way: without
+        // one every claim fails and the log fills with the same error for as
+        // long as the machine is up.
+        const shouldRun = credentials.unattended || loadAgentEnabled()
+        if (credentials.token && shouldRun && !isAgentRunning()) startAgent(stored)
       })
       .catch(() => undefined)
   }, [])
