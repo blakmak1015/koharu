@@ -245,8 +245,36 @@ The shim, group G and group D are committed on `port-0.83` (`33f78c74`, `53a55ad
 running: the owner chose 0.83.5 as the base on 2026-10-16 and accepted that the farm stays
 down until group B lands.
 
-**In progress:** group B, reduced scope — see §5.
-**Not started:** groups C, A, F, E, H.
+**Group B, reduced scope — code complete, not yet run against the live site.**
+
+| piece | where |
+|---|---|
+| headless commands: `farm_import_pages` (by URL), `farm_get_page`, `farm_render_page`, agent credentials | `crates/koharu-app/src/commands/farm.rs` |
+| text-free render for the overlay reader | `koharu-renderer`, `render_without_text` |
+| the agent, 928 lines → 796 | `packages/koharu/lib/farm/` |
+| operator panel | `packages/koharu/components/farm/FarmPanel.tsx` |
+| watchdog | `ops/keepalive.ps1` |
+
+What the port removed rather than carried: polling `/api/v1/operations`
+(`subscribe` pushes, and the terminal set is now the type, so a page ending in
+an unrecognised status cannot park a worker again); the LLM catalog dance
+before every chapter (`ops/restart-server.ps1` pins it); and the whole of
+`website.ts`, which turned out to be the human translator's device-login flow
+and belongs with group A.
+
+Found while porting, and worth knowing before the first live run:
+
+- `Documents\Koharu` is where projects now live, which on this machine is a
+  **Thai-named OneDrive folder**. Agent projects will sync to the cloud unless
+  the data path is moved — the same trap as the runtime store sitting on the
+  Desktop.
+- Upstream's `import` and `export` are dialog-only; everything headless had to
+  be added.
+- Upstream already owns `run_agent`, `login_agent` and friends for its Codex
+  integration, hence the `farm_` prefix on everything here.
+
+**Still to verify:** a live run against manga-th.net — nothing in group B has
+executed outside tests. **Not started:** groups C, A, F, E, H.
 
 `koharu-keepalive.ps1` is deliberately **not** ported yet. Its health probe is a
 one-line change (`:4000/api/v1/operations` → `:4100/health`), but its disk
