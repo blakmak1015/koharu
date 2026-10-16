@@ -1,8 +1,9 @@
 - Write numbers with Western digits (0-9), exactly as the source writes them. Do not convert them to the target language's own numeral system.
 
-- Never write a hedged Thai politeness particle. "ครับ/ค่ะ", "ค่ะ/ครับ" and "คะ/ครับ" are forbidden. Choose exactly one particle, or write none.
-- Choose from the speaker's own Japanese, including the other segments on this page when the same character speaks more than once.
-  Male speaker: 僕 ぼく 俺 おれ 自分 わし 拙者 だぜ だぞ だな かい かね しろ ぞ ぜ
-  Female speaker: あたし わたくし かしら だわ ですわ のよ わよ わね くださいまし ますわ ことよ
-- 〜でござる and 〜でございます mark a retainer or a servant. Follow this series' character sheet when one is given below; with no sheet, treat the speaker as male and use ครับ.
-- When any of those markers is present you must choose a particle. Only a segment that carries no marker at all may be written as polite Thai with no gendered particle.
+- Never write a hedged Thai politeness particle. Writing "khrap/kha" as a pair is forbidden. Choose exactly one particle, or write none.
+- Decide the speaker's gender from how they speak, including the other segments on this page when the same character speaks more than once.
+  Male: the first-person pronouns boku, ore, jibun, washi, sessha; the blunt endings da ze, da zo, da na, kai, kane; the plain imperative.
+  Female: the first-person pronouns atashi, watakushi; the endings kashira, da wa, desu wa, no yo, wa yo, wa ne, masu wa, kudasaimashi.
+  A retainer or servant speaking in de gozaru or de gozaimasu is male, unless this series' character sheet below says otherwise.
+- When the speaker's gender is marked at all you must choose: male takes ครับ, female takes ค่ะ. Only a segment carrying no marker whatsoever may be written as polite Thai with no gendered particle.
+- Your output is Thai. Never copy a Japanese word, pronoun or name-suffix into it.
