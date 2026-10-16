@@ -76,6 +76,27 @@ export const commands = {
 	commitErase: (expectedRevision: Revision, layer: EntityId, points: Point[], diameter: number) => __TAURI_INVOKE<LayerCommit>("commit_erase", { expectedRevision, layer, points: points.map(i=>i), diameter }),
 	commitTransform: (expectedRevision: Revision, elements: TransformFrame[]) => __TAURI_INVOKE<number | null>("commit_transform", { expectedRevision, elements }).then((v) => (v==null?v:v as typeof v)),
 	commitInpaint: (expectedRevision: Revision, points: Point[], diameter: number) => __TAURI_INVOKE<string | null>("commit_inpaint", { expectedRevision, points: points.map(i=>i), diameter }),
+	/**
+	 *  Append pages to the open project from paths the caller already has.
+	 * 
+	 *  The agent downloads raw pages to a scratch directory and passes the paths
+	 *  here. Missing paths are rejected up front: a silently short import would
+	 *  produce a chapter with pages missing, which is worse than a failed job.
+	 */
+	farmImportPages: (paths: string[]) => __TAURI_INVOKE<null>("farm_import_pages", { paths }),
+	/**
+	 *  Render every page of the open project into `destination`.
+	 * 
+	 *  `destination` is a directory for `png` and `psd`, and the archive path
+	 *  itself for `cbz`, matching what upstream's dialog would have returned.
+	 */
+	farmExportPages: (destination: string, format: ExportFormat) => __TAURI_INVOKE<null>("farm_export_pages", { destination, format }),
+	/**  Store the website session token for this instance. */
+	farmSetWebsiteToken: (token: string) => __TAURI_INVOKE<null>("farm_set_website_token", { token }),
+	/**  Read back the website session token, or `None` when the instance has none. */
+	farmGetWebsiteToken: () => __TAURI_INVOKE<string | null>("farm_get_website_token"),
+	/**  Forget the website session token for this instance. */
+	farmClearWebsiteToken: () => __TAURI_INVOKE<null>("farm_clear_website_token"),
 };
 
 /* Types */

@@ -411,6 +411,25 @@ pub(crate) async fn import(
     let Some(files) = files else {
         return Ok(());
     };
+    add_pages(files, &desktop, &project, &processing, &canvas_channel).await
+}
+
+/// Decode `files` and append them to the open project as pages.
+///
+/// Fork: extracted from `import` so the unattended farm can add pages without
+/// a file dialog. Everything below this line is upstream's import path
+/// unchanged — sharing it rather than copying it keeps the two callers from
+/// drifting when upstream changes how a page is built.
+pub(crate) async fn add_pages(
+    files: Vec<std::path::PathBuf>,
+    desktop: &Desktop,
+    project: &CurrentProject,
+    processing: &Processing,
+    canvas_channel: &CanvasChannel,
+) -> std::result::Result<(), Error> {
+    if !processing.stops.lock().is_empty() {
+        return Err(anyhow::anyhow!("pages cannot be imported while processing is running").into());
+    }
     if files.is_empty() {
         return Err(anyhow::anyhow!("no supported images were found in the selection").into());
     }

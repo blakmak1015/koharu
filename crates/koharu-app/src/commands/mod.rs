@@ -1,6 +1,8 @@
 pub(crate) mod agent;
 pub(crate) mod canvas;
 pub(crate) mod editing;
+/// Fork-only: headless equivalents of the dialog-driven commands.
+pub(crate) mod farm;
 pub(crate) mod fonts;
 pub(crate) mod import;
 pub(crate) mod lifecycle;
@@ -106,6 +108,12 @@ pub fn bindings() -> tauri_specta::Builder<tauri_runtime_cef::CefRuntime> {
             canvas::commit_erase,
             canvas::commit_transform,
             canvas::commit_inpaint,
+            // Fork: the unattended farm's headless surface.
+            farm::farm_import_pages,
+            farm::farm_export_pages,
+            farm::farm_set_website_token,
+            farm::farm_get_website_token,
+            farm::farm_clear_website_token,
         ])
         .disable_serde_phases()
         .error_handling(ErrorHandlingMode::Throw)
