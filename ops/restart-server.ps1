@@ -23,6 +23,13 @@ param(
   # nothing about numerals, and Thai has its own digits.
   [string] $Instructions = "- Write numbers with Western digits (0-9), exactly as the source writes them. Do not convert them to the target language's own numeral system.",
 
+  # The agent's website credentials. Blank leaves whatever is already stored,
+  # so the normal restart does not need the token on the command line. The
+  # farm window starts hidden, so this is the only way to set one without a
+  # human at the keyboard.
+  [string] $AgentToken = "",
+  [string] $AgentId    = "",
+
   [int]    $ReadyTimeoutSeconds = 180
 )
 
@@ -59,6 +66,21 @@ if (-not $ready) {
   exit 1
 }
 Write-Host "server READY"
+
+if ($AgentToken -ne "" -or $AgentId -ne "") {
+  $credentials = @{}
+  if ($AgentToken -ne "") { $credentials.token = $AgentToken }
+  if ($AgentId -ne "")    { $credentials.agentId = $AgentId }
+  try {
+    $stored = Invoke-RestMethod "$base/agent/credentials" -Method Put -ContentType "application/json" `
+      -Body ($credentials | ConvertTo-Json -Compress) -TimeoutSec 30
+    # The surface never returns the token, only whether one is held.
+    Write-Host ("agent credentials -> agentId=" + $stored.agentId + " hasToken=" + $stored.hasToken)
+  } catch {
+    Write-Host ("AGENT CREDENTIALS FAILED: " + $_.Exception.Message)
+    exit 1
+  }
+}
 
 # reasoning=false is not cosmetic: this llama.cpp build keeps thinking unless it
 # is disabled, and a thinking model spends max_tokens on chain-of-thought and

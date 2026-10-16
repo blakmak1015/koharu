@@ -19,6 +19,8 @@ use std::{
     },
 };
 
+pub mod credentials;
+
 use anyhow::{Context as _, Result, bail};
 use koharu_pipeline::{PipelineConfig, TranslationConfig};
 use koharu_translator::{ModelSelection, Provider};
@@ -132,6 +134,17 @@ struct Selection {
     reasoning: Option<bool>,
     #[serde(default)]
     instructions: Option<String>,
+}
+
+/// What a supervisor may pin for the translation agent. An omitted field is
+/// left alone; an empty one is cleared.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AgentCredentials {
+    #[serde(default)]
+    token: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -251,6 +264,37 @@ async fn handle(mut stream: TcpStream, readiness: Readiness) -> Result<()> {
             Ok(current) => (200, serde_json::to_value(current)?),
             Err(error) => (500, serde_json::json!({ "error": format!("{error:#}") })),
         },
+        ("GET", "/agent/credentials") => match credentials::read() {
+            Ok(current) => (
+                200,
+                serde_json::json!({
+                    "agentId": current.agent_id,
+                    "hasToken": current.token.is_some(),
+                }),
+            ),
+            Err(error) => (500, serde_json::json!({ "error": format!("{error:#}") })),
+        },
+        // The token is write-only over HTTP. The supervisor already has it —
+        // handing it back would only widen where it can leak from.
+        ("PUT", "/agent/credentials") => {
+            match serde_json::from_slice::<AgentCredentials>(&request.body) {
+                Err(error) => (
+                    400,
+                    serde_json::json!({ "error": format!("invalid request body: {error}") }),
+                ),
+                Ok(body) => match credentials::write(body.token.as_deref(), body.agent_id.as_deref())
+                {
+                    Ok(current) => (
+                        200,
+                        serde_json::json!({
+                            "agentId": current.agent_id,
+                            "hasToken": current.token.is_some(),
+                        }),
+                    ),
+                    Err(error) => (500, serde_json::json!({ "error": format!("{error:#}") })),
+                },
+            }
+        }
         ("PUT", "/llm/current") => match serde_json::from_slice::<Selection>(&request.body) {
             Err(error) => (
                 400,
@@ -265,6 +309,7 @@ async fn handle(mut stream: TcpStream, readiness: Readiness) -> Result<()> {
             404,
             serde_json::json!({ "error": "unknown route", "routes": [
                 "GET /health", "GET /llm/current", "PUT /llm/current",
+                "GET /agent/credentials", "PUT /agent/credentials",
             ]}),
         ),
     };

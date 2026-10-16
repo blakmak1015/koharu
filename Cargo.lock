@@ -4776,6 +4776,7 @@ version = "0.83.5"
 dependencies = [
  "anyhow",
  "koharu-pipeline",
+ "koharu-secrets",
  "koharu-translator",
  "serde",
  "serde_json",
