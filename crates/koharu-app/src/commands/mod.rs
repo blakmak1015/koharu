@@ -111,9 +111,9 @@ pub fn bindings() -> tauri_specta::Builder<tauri_runtime_cef::CefRuntime> {
             // Fork: the unattended farm's headless surface.
             farm::farm_import_pages,
             farm::farm_export_pages,
-            farm::farm_set_website_token,
-            farm::farm_get_website_token,
-            farm::farm_clear_website_token,
+            farm::farm_get_agent_credentials,
+            farm::farm_set_agent_credentials,
+            farm::farm_clear_agent_credentials,
         ])
         .disable_serde_phases()
         .error_handling(ErrorHandlingMode::Throw)

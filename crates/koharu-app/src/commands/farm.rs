@@ -14,6 +14,8 @@
 use anyhow::Context as _;
 use koharu_desktop::Desktop;
 use koharu_secrets::{ExposeSecret as _, SecretString};
+use serde::Serialize;
+use specta::Type;
 use std::path::PathBuf;
 use tauri::State;
 
@@ -33,13 +35,49 @@ use super::{
 /// overwrite the other.
 const INSTANCE_VARIABLE: &str = "KOHARU_INSTANCE_ID";
 
-fn website_token_key() -> String {
-    match std::env::var(INSTANCE_VARIABLE) {
-        Ok(instance) if !instance.trim().is_empty() => {
-            format!("website-token.{}", instance.trim())
-        }
-        _ => "website-token".to_owned(),
+/// Matches the 0.59.2 agent's own fallback, so an existing website-side
+/// registration keeps working after the port.
+const DEFAULT_AGENT_ID: &str = "koharu-default";
+
+fn instance() -> Option<String> {
+    std::env::var(INSTANCE_VARIABLE)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn namespaced(key: &str) -> String {
+    match instance() {
+        Some(instance) => format!("{key}.{instance}"),
+        None => key.to_owned(),
     }
+}
+
+/// What the translation agent presents to the website.
+///
+/// Two values, not one: the website authenticates the worker with
+/// `x-translation-agent-token` and attributes the claim with
+/// `x-translation-agent-id`, so a job claimed by one machine is visible as
+/// that machine's.
+#[derive(Debug, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AgentCredentials {
+    /// `None` when this instance has never been given a token.
+    token: Option<String>,
+    agent_id: String,
+}
+
+fn read_credentials() -> anyhow::Result<AgentCredentials> {
+    let token = koharu_secrets::get(&namespaced("agent-token"))?
+        .map(|secret| secret.expose_secret().to_owned());
+    // The stored value wins, then the instance name the supervisor already
+    // sets, so a second farm machine identifies itself without extra setup.
+    let agent_id = koharu_secrets::get(&namespaced("agent-id"))?
+        .map(|secret| secret.expose_secret().to_owned())
+        .filter(|value| !value.is_empty())
+        .or_else(instance)
+        .unwrap_or_else(|| DEFAULT_AGENT_ID.to_owned());
+    Ok(AgentCredentials { token, agent_id })
 }
 
 /// Append pages to the open project from paths the caller already has.
@@ -115,32 +153,42 @@ pub(crate) async fn farm_export_pages(
     write_export(format, destination, &desktop, snapshot, pages).await
 }
 
-/// Store the website session token for this instance.
+/// Read this instance's agent credentials.
 #[tauri::command]
 #[specta::specta]
-pub(crate) async fn farm_set_website_token(token: String) -> std::result::Result<(), Error> {
-    let token = token.trim().to_owned();
-    if token.is_empty() {
-        koharu_secrets::delete(&website_token_key())?;
-        return Ok(());
+pub(crate) async fn farm_get_agent_credentials()
+-> std::result::Result<AgentCredentials, Error> {
+    Ok(read_credentials()?)
+}
+
+/// Store this instance's agent credentials, and return what is now in effect.
+///
+/// An omitted field is left alone and an empty one is cleared, so the panel can
+/// change the token without restating the id.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn farm_set_agent_credentials(
+    token: Option<String>,
+    agent_id: Option<String>,
+) -> std::result::Result<AgentCredentials, Error> {
+    for (key, value) in [("agent-token", token), ("agent-id", agent_id)] {
+        let Some(value) = value else { continue };
+        let value = value.trim();
+        if value.is_empty() {
+            koharu_secrets::delete(&namespaced(key))?;
+        } else {
+            koharu_secrets::set(&namespaced(key), &SecretString::from(value))?;
+        }
     }
-    koharu_secrets::set(&website_token_key(), &SecretString::from(token))?;
-    Ok(())
+    Ok(read_credentials()?)
 }
 
-/// Read back the website session token, or `None` when the instance has none.
+/// Forget this instance's agent credentials.
 #[tauri::command]
 #[specta::specta]
-pub(crate) async fn farm_get_website_token() -> std::result::Result<Option<String>, Error> {
-    Ok(koharu_secrets::get(&website_token_key())?
-        .map(|secret| secret.expose_secret().to_owned()))
-}
-
-/// Forget the website session token for this instance.
-#[tauri::command]
-#[specta::specta]
-pub(crate) async fn farm_clear_website_token() -> std::result::Result<(), Error> {
-    koharu_secrets::delete(&website_token_key())?;
+pub(crate) async fn farm_clear_agent_credentials() -> std::result::Result<(), Error> {
+    koharu_secrets::delete(&namespaced("agent-token"))?;
+    koharu_secrets::delete(&namespaced("agent-id"))?;
     Ok(())
 }
 
@@ -148,17 +196,26 @@ pub(crate) async fn farm_clear_website_token() -> std::result::Result<(), Error>
 mod tests {
     use super::*;
 
-    /// Two instances on one machine must not share a credential.
+    /// Two instances on one machine must not share a credential, and a second
+    /// farm machine should identify itself from the instance name the
+    /// supervisor already sets rather than needing its id typed in.
+    ///
+    /// One test, not two: the instance name is a process-wide environment
+    /// variable, so parallel tests would overwrite each other's setup.
     #[test]
-    fn the_token_key_is_namespaced_per_instance() {
-        // SAFETY: single-threaded test, and the variable is read, never held.
+    fn the_instance_name_namespaces_credentials_and_names_the_agent() {
+        // SAFETY: the variable is only read elsewhere, never held across this.
         unsafe { std::env::set_var(INSTANCE_VARIABLE, "server") };
-        assert_eq!(website_token_key(), "website-token.server");
+        assert_eq!(namespaced("agent-token"), "agent-token.server");
+        assert_eq!(namespaced("agent-id"), "agent-id.server");
+        assert_eq!(instance().as_deref(), Some("server"));
 
         unsafe { std::env::set_var(INSTANCE_VARIABLE, "  ") };
-        assert_eq!(website_token_key(), "website-token");
+        assert_eq!(namespaced("agent-token"), "agent-token");
+        assert_eq!(instance(), None);
 
         unsafe { std::env::remove_var(INSTANCE_VARIABLE) };
-        assert_eq!(website_token_key(), "website-token");
+        assert_eq!(namespaced("agent-token"), "agent-token");
+        assert_eq!(instance(), None);
     }
 }

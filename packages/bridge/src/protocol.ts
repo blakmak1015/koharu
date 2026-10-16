@@ -91,12 +91,17 @@ export const commands = {
 	 *  itself for `cbz`, matching what upstream's dialog would have returned.
 	 */
 	farmExportPages: (destination: string, format: ExportFormat) => __TAURI_INVOKE<null>("farm_export_pages", { destination, format }),
-	/**  Store the website session token for this instance. */
-	farmSetWebsiteToken: (token: string) => __TAURI_INVOKE<null>("farm_set_website_token", { token }),
-	/**  Read back the website session token, or `None` when the instance has none. */
-	farmGetWebsiteToken: () => __TAURI_INVOKE<string | null>("farm_get_website_token"),
-	/**  Forget the website session token for this instance. */
-	farmClearWebsiteToken: () => __TAURI_INVOKE<null>("farm_clear_website_token"),
+	/**  Read this instance's agent credentials. */
+	farmGetAgentCredentials: () => __TAURI_INVOKE<AgentCredentials>("farm_get_agent_credentials"),
+	/**
+	 *  Store this instance's agent credentials, and return what is now in effect.
+	 * 
+	 *  An omitted field is left alone and an empty one is cleared, so the panel can
+	 *  change the token without restating the id.
+	 */
+	farmSetAgentCredentials: (token: string | null, agentId: string | null) => __TAURI_INVOKE<AgentCredentials>("farm_set_agent_credentials", { token, agentId }),
+	/**  Forget this instance's agent credentials. */
+	farmClearAgentCredentials: () => __TAURI_INVOKE<null>("farm_clear_agent_credentials"),
 };
 
 /* Types */
@@ -104,6 +109,20 @@ export type Account = {
 	id: string,
 	email: string | null,
 	plan: string | null,
+};
+
+/**
+ *  What the translation agent presents to the website.
+ * 
+ *  Two values, not one: the website authenticates the worker with
+ *  `x-translation-agent-token` and attributes the claim with
+ *  `x-translation-agent-id`, so a job claimed by one machine is visible as
+ *  that machine's.
+ */
+export type AgentCredentials = {
+	/**  `None` when this instance has never been given a token. */
+	token: string | null,
+	agentId: string,
 };
 
 export type AgentStatus = {
