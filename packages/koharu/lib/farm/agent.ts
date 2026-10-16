@@ -20,7 +20,6 @@ import {
   completeJob,
   delay,
   failJob,
-  fetchDeadline,
   reason,
   sendHeartbeat,
   sourceUrl,
@@ -336,20 +335,20 @@ async function translatePages(
  * one can be reached.
  */
 async function providerReachable(): Promise<boolean> {
+  const { pipeline } = await commands.getPreferences()
+  const provider = pipeline.translation.model.provider
   try {
-    const { providers } = await commands.getPreferences()
-    const entry = providers.entries.find(
-      (candidate) => candidate.config.provider === 'openai-compatible',
-    )
-    const base =
-      entry?.config.provider === 'openai-compatible' ? entry.config.settings.base_url : null
-    if (!base) return true // Not this provider; nothing here to check.
-    const response = await fetchDeadline(`${base.replace(/\/$/, '')}/models`, {}, 15_000)
-    if (response.ok) return true
-    log(`translation provider is not answering (HTTP ${response.status})`)
+    // Asked through koharu, not with fetch. The provider is a different
+    // origin and sends no CORS headers - a Cloudflare 502 certainly does not
+    // - so from the webview a dead server and a healthy one both come back as
+    // "Failed to fetch", and the agent would idle for ever. Listing models is
+    // the same call koharu already makes to populate its model picker.
+    const models = await commands.getTranslationModels()
+    if (models.some((model) => model.provider === provider)) return true
+    log(`translation provider ${provider} is not answering`)
     return false
   } catch (error) {
-    log(`translation provider is not answering: ${reason(error)}`)
+    log(`could not reach the translation provider: ${reason(error)}`)
     return false
   }
 }
