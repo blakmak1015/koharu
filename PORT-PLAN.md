@@ -155,10 +155,24 @@ Consequences for the plan:
   `expandable_segments:True,garbage_collection_threshold:0.8` → 5,129 MB, about 10 % off.
 - Shrinking source pages does nothing: a 300×425 input still peaked at 5,719 MB, because
   `preprocess` upsamples to 1152² regardless.
-- **Open: bf16.** `set_precision` enables bf16 on ROCm only for `gfx908/90a/942/950` and
-  `gfx11xx/12xx`, so `gfx1032` runs everything in fp32 and pays twice. Enabling it would
-  halve the attention matrices, but RDNA2 has no bf16 matrix instructions — measure speed and
-  output equivalence before trusting it.
+- **bf16: tested, rejected.** `set_precision` enables bf16 on ROCm only for
+  `gfx908/90a/942/950` and `gfx11xx/12xx`, so `gfx1032` runs fp32. Adding `gfx103` to that
+  list does engage — the probe reports `use_bfloat16=true` and detections come back with
+  bf16-rounded scores and boxes shifted about a pixel — and it buys **nothing**:
+
+  | | peak dedicated | wall time |
+  |---|---|---|
+  | fp32 | 5,693 MB | 13.52 s |
+  | bf16 | 5,731 MB | 13.51 s |
+
+  Identical, and the weight-load ramp matches sample for sample. The weights halve but the
+  peak does not, which points at `Tensor::scaled_dot_product_attention`: with no
+  memory-efficient backend in this build it falls back to the math path, and that computes
+  the attention matrix in fp32 whatever the weights are. Changing numerics for zero saving is
+  strictly negative, so the change was reverted. Caveat: `empty_cache` is unavailable, so
+  these are reserved-memory peaks, not live-memory peaks.
+
+  The real lever is therefore a memory-efficient SDPA backend, not the weight dtype.
 
 ## 8. Status
 
