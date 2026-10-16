@@ -61,6 +61,12 @@ export async function pageTextBlocks(
     return { textBlocks: [], width: 0, height: 0 }
   }
 
+  // A pipeline-created text layer carries no geometry of its own: detection
+  // makes the layer and relates it to the region it was recognised from, and
+  // the position lives on that region. Looking only at the layer found
+  // nothing on every page of every chapter.
+  const regions = new Map(page.regions.map((region) => [region.id, region]))
+
   const counts = { layers: 0, text: 0, visible: 0, geometry: 0, translated: 0 }
   const textBlocks: TextBlock[] = []
   for (const layer of page.layers as Layer[]) {
@@ -69,12 +75,16 @@ export async function pageTextBlocks(
     counts.text += 1
     if (!layer.visibility.visible) continue
     counts.visible += 1
-    if (!layer.geometry) continue
+    const geometry =
+      layer.geometry ??
+      regions.get(layer.content.source_region ?? '')?.geometry ??
+      regions.get(layer.automatic_region ?? '')?.geometry
+    if (!geometry) continue
     counts.geometry += 1
     const text = layer.content.translation?.text?.trim()
     if (!text) continue
     counts.translated += 1
-    const box = bounds(layer.geometry.points)
+    const box = bounds(geometry.points)
     if (box.w <= 0 || box.h <= 0) continue
     const sourceText = layer.content.source?.text?.trim()
     const size = layer.typography?.size ?? 0
