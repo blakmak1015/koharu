@@ -18,7 +18,7 @@ use image::{
 };
 use koharu_desktop::Desktop;
 use koharu_rasterizer::RasterOptions;
-use koharu_scene::EntityId;
+use koharu_scene::{EntityId, TextLayout as SceneTextLayout, Visibility};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
@@ -29,7 +29,7 @@ use super::{
     canvas::CanvasChannel,
     lifecycle::add_pages,
     processing::Processing,
-    project::{CurrentProject, Page, Project},
+    project::CurrentProject,
 };
 
 /// One source page to fetch, in reading order.
@@ -138,23 +138,133 @@ pub(crate) async fn farm_log(message: String) -> std::result::Result<(), Error> 
     Ok(())
 }
 
-/// Read one page by id, without selecting it.
+/// One translated speech bubble, as the published reader needs it.
+#[derive(Debug, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FarmBlock {
+    text: String,
+    /// The recognised original, so a reviewer can compare.
+    source_text: Option<String>,
+    /// Page pixels. The caller turns these into fractions of the page.
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    angle_degrees: f32,
+    font_size: Option<f32>,
+    color: Option<[u8; 4]>,
+    vertical: bool,
+}
+
+#[derive(Debug, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FarmPage {
+    width: f64,
+    height: f64,
+    blocks: Vec<FarmBlock>,
+}
+
+/// Read one page's translated blocks by id, without selecting it.
 ///
-/// Upstream's `get_page` returns whichever page is active, which the agent
-/// cannot use: it runs several pages at once, and selecting each one to read
-/// its text blocks would make them race over a single shared selection — and
-/// would move the editor's view around while a person is looking at it.
+/// Not upstream's `get_page`, for two reasons. It returns whichever page is
+/// active, and the agent runs several at once, so selecting each one to read
+/// it would make them race over a single shared selection and move the
+/// editor's view while someone is looking at it.
+///
+/// And its `Layer::Text` view reports only a Geometry component sitting on the
+/// layer itself, which nothing the pipeline builds ever has: detection creates
+/// the layer and relates it to the region it was recognised from, and the
+/// position lives there. Resolving that is what `TextLayerRef::frame` is for,
+/// so this asks the scene instead of reassembling the answer in TypeScript.
 #[tauri::command]
 #[specta::specta]
-pub(crate) async fn farm_get_page(
+pub(crate) async fn farm_page_blocks(
     page: EntityId,
     project: State<'_, CurrentProject>,
-) -> std::result::Result<Page, Error> {
+) -> std::result::Result<FarmPage, Error> {
     let snapshot = {
         let project = project.project.lock().await;
         project.as_ref().context("no project is open")?.snapshot()
     };
-    Ok(Project::page(&snapshot, page)?)
+    let value = snapshot.page(page)?.page()?;
+    let mut blocks = Vec::new();
+
+    for entity in snapshot.descendants(page)? {
+        let id = entity.id();
+        if snapshot.component::<SceneTextLayout>(id)?.is_none() {
+            continue;
+        }
+        if snapshot
+            .component::<Visibility>(id)?
+            .is_some_and(|visibility| !visibility.visible)
+        {
+            continue;
+        }
+        let layer = snapshot.text_layer(id)?;
+        let content = layer.content()?;
+        let Some(translation) = content.translation()? else {
+            continue;
+        };
+        let text = translation.text.value.trim().to_owned();
+        if text.is_empty() {
+            continue;
+        }
+        // The authored frame, else the balloon or fitted region behind it,
+        // else the region the text was recognised from.
+        let geometry = match layer.frame()? {
+            Some(geometry) => Some(geometry),
+            None => content
+                .source_region()?
+                .map(koharu_scene::AnalysisRegionRef::geometry)
+                .transpose()?,
+        };
+        let Some(geometry) = geometry else { continue };
+        let (x, y, width, height) = bounds(&geometry);
+        if width <= 0.0 || height <= 0.0 {
+            continue;
+        }
+        let typography = layer.typography()?;
+        blocks.push(FarmBlock {
+            text,
+            source_text: content
+                .source()?
+                .map(|source| source.text.value.trim().to_owned())
+                .filter(|source| !source.is_empty()),
+            x,
+            y,
+            width,
+            height,
+            angle_degrees: snapshot
+                .component::<SceneTextLayout>(id)?
+                .and_then(|layout| layout.angle_degrees)
+                .unwrap_or(0.0_f32),
+            font_size: typography.as_ref().and_then(|value| value.size),
+            color: typography.as_ref().and_then(|value| value.color),
+            vertical: typography
+                .as_ref()
+                .and_then(|value| value.writing_mode)
+                .is_some_and(|mode| matches!(mode, koharu_scene::WritingMode::Vertical)),
+        });
+    }
+
+    Ok(FarmPage {
+        width: value.width,
+        height: value.height,
+        blocks,
+    })
+}
+
+fn bounds(geometry: &koharu_scene::Geometry) -> (f64, f64, f64, f64) {
+    let xs = geometry.points.iter().map(|point| point.x);
+    let ys = geometry.points.iter().map(|point| point.y);
+    let left = xs.clone().fold(f64::INFINITY, f64::min);
+    let top = ys.clone().fold(f64::INFINITY, f64::min);
+    let right = xs.fold(f64::NEG_INFINITY, f64::max);
+    let bottom = ys.fold(f64::NEG_INFINITY, f64::max);
+    if !left.is_finite() || !top.is_finite() {
+        return (0.0, 0.0, 0.0, 0.0);
+    }
+    (left, top, right - left, bottom - top)
 }
 
 /// Which image of a page the agent wants.

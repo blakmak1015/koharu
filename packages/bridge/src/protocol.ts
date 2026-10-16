@@ -96,14 +96,20 @@ export const commands = {
 	 */
 	farmImportPages: (pages: SourcePage[]) => __TAURI_INVOKE<EntityId[]>("farm_import_pages", { pages }),
 	/**
-	 *  Read one page by id, without selecting it.
+	 *  Read one page's translated blocks by id, without selecting it.
 	 * 
-	 *  Upstream's `get_page` returns whichever page is active, which the agent
-	 *  cannot use: it runs several pages at once, and selecting each one to read
-	 *  its text blocks would make them race over a single shared selection — and
-	 *  would move the editor's view around while a person is looking at it.
+	 *  Not upstream's `get_page`, for two reasons. It returns whichever page is
+	 *  active, and the agent runs several at once, so selecting each one to read
+	 *  it would make them race over a single shared selection and move the
+	 *  editor's view while someone is looking at it.
+	 * 
+	 *  And its `Layer::Text` view reports only a Geometry component sitting on the
+	 *  layer itself, which nothing the pipeline builds ever has: detection creates
+	 *  the layer and relates it to the region it was recognised from, and the
+	 *  position lives there. Resolving that is what `TextLayerRef::frame` is for,
+	 *  so this asks the scene instead of reassembling the answer in TypeScript.
 	 */
-	farmGetPage: (page: EntityId) => __TAURI_INVOKE<Page>("farm_get_page", { page }).then((v) => (({...v,layers:v.layers.map(i=>i),regions:v.regions.map(i=>({...i,geometry:({...i.geometry,points:i.geometry.points.map(i=>i)})}))}) as typeof v)),
+	farmPageBlocks: (page: EntityId) => __TAURI_INVOKE<FarmPage>("farm_page_blocks", { page }).then((v) => (({...v,blocks:v.blocks.map(i=>({...i,fontSize:i.fontSize==null?i.fontSize:i.fontSize}))}) as typeof v)),
 	/**
 	 *  Render one page of the open project and return it as PNG bytes.
 	 * 
@@ -251,6 +257,28 @@ export type Error = string;
 export type Event = { type: "started"; run: RunId } | { type: "text_delta"; run: RunId; delta: string } | { type: "reasoning_delta"; run: RunId; delta: string } | { type: "tool_started"; run: RunId; call_id: string; name: string } | { type: "tool_finished"; run: RunId; call_id: string; name: string; changed: boolean; output: string } | { type: "completed"; run: RunId; message: string } | { type: "failed"; run: RunId; message: string } | { type: "cancelled"; run: RunId };
 
 export type ExportFormat = "png" | "psd" | "cbz";
+
+/**  One translated speech bubble, as the published reader needs it. */
+export type FarmBlock = {
+	text: string,
+	/**  The recognised original, so a reviewer can compare. */
+	sourceText: string | null,
+	/**  Page pixels. The caller turns these into fractions of the page. */
+	x: number,
+	y: number,
+	width: number,
+	height: number,
+	angleDegrees: number,
+	fontSize: number | null,
+	color: [number, number, number, number] | null,
+	vertical: boolean,
+};
+
+export type FarmPage = {
+	width: number,
+	height: number,
+	blocks: FarmBlock[],
+};
 
 export type Flux2KleinConfig = {
 	prompt?: string,

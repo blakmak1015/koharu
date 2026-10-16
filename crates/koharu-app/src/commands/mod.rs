@@ -111,7 +111,7 @@ pub fn bindings() -> tauri_specta::Builder<tauri_runtime_cef::CefRuntime> {
             // Fork: the unattended farm's headless surface.
             farm::farm_log,
             farm::farm_import_pages,
-            farm::farm_get_page,
+            farm::farm_page_blocks,
             farm::farm_render_page,
             farm::farm_get_agent_credentials,
             farm::farm_set_agent_credentials,

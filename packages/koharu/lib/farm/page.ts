@@ -4,7 +4,7 @@
 // and the translated text as proportional boxes the reader lays over it.
 
 import { commands } from '@koharu/bridge/protocol'
-import type { Layer, Page, PageVariant } from '@koharu/bridge/protocol'
+import type { FarmPage, PageVariant } from '@koharu/bridge/protocol'
 
 import type { TextBlock } from './website'
 
@@ -27,14 +27,6 @@ const contrastingStroke = (color: readonly number[] | null | undefined): string 
   return 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2] > 128 ? '#000000' : '#ffffff'
 }
 
-function bounds(points: { x: number; y: number }[]): { x: number; y: number; w: number; h: number } {
-  const xs = points.map((point) => point.x)
-  const ys = points.map((point) => point.y)
-  const x = Math.min(...xs)
-  const y = Math.min(...ys)
-  return { x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y }
-}
-
 /**
  * Read one page's translated text as proportional boxes.
  *
@@ -45,71 +37,37 @@ export async function pageTextBlocks(
   pageId: string,
   log?: (message: string) => void,
 ): Promise<{ textBlocks: TextBlock[]; width: number; height: number }> {
-  let page: Page
+  let page: FarmPage
   try {
-    page = await commands.farmGetPage(pageId)
+    page = await commands.farmPageBlocks(pageId)
   } catch (error) {
     // Never silently: an empty result here costs the published chapter its
     // HTML text overlay, and the first time it happened nothing said so.
     log?.(`could not read page ${pageId}: ${String(error)}`)
     return { textBlocks: [], width: 0, height: 0 }
   }
-  const width = page.size.width
-  const height = page.size.height
+  const { width, height } = page
   if (!(width > 0 && height > 0)) {
     log?.(`page ${pageId} has no size (${width}x${height})`)
     return { textBlocks: [], width: 0, height: 0 }
   }
 
-  // A pipeline-created text layer carries no geometry of its own: detection
-  // makes the layer and relates it to the region it was recognised from, and
-  // the position lives on that region. Looking only at the layer found
-  // nothing on every page of every chapter.
-  const regions = new Map(page.regions.map((region) => [region.id, region]))
-
-  const counts = { layers: 0, text: 0, visible: 0, geometry: 0, translated: 0 }
-  const textBlocks: TextBlock[] = []
-  for (const layer of page.layers as Layer[]) {
-    counts.layers += 1
-    if (layer.type !== 'text') continue
-    counts.text += 1
-    if (!layer.visibility.visible) continue
-    counts.visible += 1
-    const geometry =
-      layer.geometry ??
-      regions.get(layer.content.source_region ?? '')?.geometry ??
-      regions.get(layer.automatic_region ?? '')?.geometry
-    if (!geometry) continue
-    counts.geometry += 1
-    const text = layer.content.translation?.text?.trim()
-    if (!text) continue
-    counts.translated += 1
-    const box = bounds(geometry.points)
-    if (box.w <= 0 || box.h <= 0) continue
-    const sourceText = layer.content.source?.text?.trim()
-    const size = layer.typography?.size ?? 0
-    textBlocks.push({
-      x: clamp01(box.x / width),
-      y: clamp01(box.y / height),
-      w: clamp01(box.w / width),
-      h: clamp01(box.h / height),
-      rotationDeg: layer.angle_degrees ?? 0,
-      text,
-      ...(sourceText ? { sourceText } : {}),
-      fontSizeRel: size > 0 ? size / width : 0,
-      color: toHex(layer.typography?.color),
-      strokeColor: contrastingStroke(layer.typography?.color),
-      // Vertical Japanese is the common case, so the reader needs to be told
-      // when a block is not horizontal.
-      direction: layer.typography?.writing_mode === 'Vertical' ? 'vertical' : 'horizontal',
-    })
-  }
-  if (textBlocks.length === 0) {
-    log?.(
-      `page ${pageId}: no text blocks — layers ${counts.layers}, text ${counts.text}, ` +
-        `visible ${counts.visible}, with geometry ${counts.geometry}, translated ${counts.translated}`,
-    )
-  }
+  // Proportional, not pixels: the reader serves a resized image and lays the
+  // same boxes over whatever size it ends up showing.
+  const textBlocks: TextBlock[] = page.blocks.map((block) => ({
+    x: clamp01(block.x / width),
+    y: clamp01(block.y / height),
+    w: clamp01(block.width / width),
+    h: clamp01(block.height / height),
+    rotationDeg: block.angleDegrees,
+    text: block.text,
+    ...(block.sourceText ? { sourceText: block.sourceText } : {}),
+    fontSizeRel: block.fontSize && block.fontSize > 0 ? block.fontSize / width : 0,
+    color: toHex(block.color),
+    strokeColor: contrastingStroke(block.color),
+    direction: block.vertical ? ('vertical' as const) : ('horizontal' as const),
+  }))
+  if (textBlocks.length === 0) log?.(`page ${pageId}: the scene has no translated blocks`)
   return { textBlocks, width, height }
 }
 
