@@ -91,9 +91,9 @@ export const commands = {
 	 *  Per page, not per project: the agent uploads each page as it finishes, so
 	 *  an interrupted chapter resumes from the pages that were not done rather
 	 *  than starting again. The bytes come back to the webview because the
-	 *  watermark and SEO overlay are baked there before upload.
+	 *  watermark is baked there before upload.
 	 */
-	farmRenderPage: (page: EntityId) => __TAURI_INVOKE<PageImage>("farm_render_page", { page }),
+	farmRenderPage: (page: EntityId, variant: PageVariant) => __TAURI_INVOKE<PageImage>("farm_render_page", { page, variant }),
 	/**  Read this instance's agent credentials. */
 	farmGetAgentCredentials: () => __TAURI_INVOKE<AgentCredentials>("farm_get_agent_credentials"),
 	/**
@@ -425,6 +425,18 @@ export type PageSummary = {
 	source_asset: string | null,
 	layer_count: number,
 };
+
+/**  Which image of a page the agent wants. */
+export type PageVariant = 
+/**  The finished page, translation burned in. */
+"translated" | 
+/**
+ *  Source plus inpainting and paint, with no text at all.
+ * 
+ *  The published reader shows this one and lays the translation over it as
+ *  real HTML, which is what makes a chapter indexable.
+ */
+"clean";
 
 export type PaintBrush = {
 	diameter: number,

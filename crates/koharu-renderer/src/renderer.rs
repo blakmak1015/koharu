@@ -118,6 +118,17 @@ impl Renderer {
         self.finish(snapshot, compiled, None, None).await
     }
 
+    /// Fork: renders the page without any text — source plus the inpainting
+    /// cleanup layer and any paint, and nothing else.
+    ///
+    /// The published reader shows this image and positions the translation as
+    /// real HTML on top of it, so the text must not also be burned in. The
+    /// frame is returned, never cached against the page: callers use it once.
+    pub async fn render_without_text(&self, snapshot: &Snapshot, page: EntityId) -> Result<Frame> {
+        let compiled = self.compile_filtered(snapshot, page, true)?;
+        self.finish(snapshot, compiled, None, None).await
+    }
+
     /// Renders a contiguous revision while retaining unchanged vector nodes.
     #[tracing::instrument(level = "info", skip_all, fields(page = %previous.page(), from = %change.from, to = %change.to))]
     pub async fn update(
@@ -488,6 +499,19 @@ struct CompiledPage {
 
 impl Renderer {
     fn compile(&self, snapshot: &Snapshot, page: EntityId) -> Result<CompiledPage> {
+        self.compile_filtered(snapshot, page, false)
+    }
+
+    /// Fork: `skip_text` leaves every text node out of the compiled page, so
+    /// the same scene also renders the clean background the published reader
+    /// overlays its own HTML text on. Filtering here rather than toggling
+    /// layer visibility keeps it out of the project and its undo history.
+    fn compile_filtered(
+        &self,
+        snapshot: &Snapshot,
+        page: EntityId,
+        skip_text: bool,
+    ) -> Result<CompiledPage> {
         let typesetting = self.inner.typesetting.load();
         let page_value = snapshot.page(page)?.page()?;
         let (width, height) = surface_size(&page_value)?;
@@ -501,6 +525,7 @@ impl Renderer {
             source_role: &source_role,
             font_families: &typesetting.font_families,
             balloon_flows: flow_plan.placements,
+            skip_text,
             layers: Vec::new(),
             dependencies: BTreeSet::from([
                 RenderDependency::Entity(page),
@@ -575,6 +600,8 @@ struct Traversal<'a> {
     source_role: &'a AssetRole,
     font_families: &'a [String],
     balloon_flows: HashMap<EntityId, ResolvedPlacement>,
+    /// Fork: see `Renderer::compile_filtered`.
+    skip_text: bool,
     layers: Vec<LayerDraft>,
     dependencies: BTreeSet<RenderDependency>,
     diagnostics: Vec<RenderDiagnostic>,
@@ -654,6 +681,10 @@ impl Traversal<'_> {
                         role: self.source_role.as_str().to_owned(),
                     });
                 }
+                self.dependencies.extend(common);
+                continue;
+            }
+            if self.skip_text && self.snapshot.component::<SceneTextLayout>(entity)?.is_some() {
                 self.dependencies.extend(common);
                 continue;
             }
@@ -1857,6 +1888,72 @@ mod tests {
         let commit = session.commit(translation).await.unwrap();
         let compiled = renderer.compile(&commit.snapshot, page).unwrap();
         assert!(compiled.layers.iter().any(|layer| layer.entity == text));
+    }
+
+    /// Fork: the published reader overlays its own HTML text on this image, so
+    /// the clean variant must drop every text layer while keeping the
+    /// inpainting result underneath it.
+    #[tokio::test]
+    async fn the_clean_variant_drops_text_but_keeps_the_cleanup_layer() {
+        let mut session = Session::memory().await.unwrap();
+        let source = AssetRole::new("source").unwrap();
+        let mut ids = None;
+        let create = session
+            .snapshot()
+            .patch(|edit| {
+                let page = edit.add_page(PageDraft::new("page", 200.0, 120.0), At::End)?;
+                let cleanup = edit.add_entity(page, At::Start)?;
+                edit.set(
+                    cleanup,
+                    &koharu_scene::RasterLayer {
+                        origin: Origin::User,
+                        name: "Cleanup".to_owned(),
+                        kind: koharu_scene::RasterLayerKind::Cleanup,
+                    },
+                )?;
+                edit.set_asset(cleanup, &source, asset(png(2, 2, [1, 2, 3, 255]), 2, 2))?;
+                let content = edit.add_text_content(page, At::End)?;
+                // A translation without its source is rejected by the scene.
+                edit.set(
+                    content,
+                    &SourceText {
+                        text: Authored::user("source".to_owned()),
+                        language: None,
+                    },
+                )?;
+                edit.set(
+                    content,
+                    &Translation {
+                        text: Authored::user("visible translation".to_owned()),
+                        language: None,
+                    },
+                )?;
+                let text = edit.add_text_layer(
+                    page,
+                    At::End,
+                    content,
+                    &SceneTextLayout {
+                        origin: Origin::User,
+                        kind: TextLayoutKind::Paragraph,
+                        angle_degrees: Some(0.0),
+                    },
+                )?;
+                edit.set(text, &Geometry::rectangle(10.0, 10.0, 80.0, 40.0))?;
+                ids = Some((page, cleanup, text));
+                Ok(())
+            })
+            .unwrap();
+        let snapshot = session.commit(create).await.unwrap().snapshot;
+        let (page, cleanup, text) = ids.unwrap();
+        let renderer = Renderer::default();
+
+        let translated = renderer.compile_filtered(&snapshot, page, false).unwrap();
+        assert!(translated.layers.iter().any(|layer| layer.entity == text));
+        assert!(translated.layers.iter().any(|layer| layer.entity == cleanup));
+
+        let clean = renderer.compile_filtered(&snapshot, page, true).unwrap();
+        assert!(clean.layers.iter().all(|layer| layer.entity != text));
+        assert!(clean.layers.iter().any(|layer| layer.entity == cleanup));
     }
 
     #[tokio::test]

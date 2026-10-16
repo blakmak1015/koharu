@@ -20,7 +20,7 @@ use koharu_desktop::Desktop;
 use koharu_rasterizer::RasterOptions;
 use koharu_scene::EntityId;
 use koharu_secrets::{ExposeSecret as _, SecretString};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::path::PathBuf;
 use tauri::{State, ipc::IpcResponse};
@@ -125,22 +125,36 @@ impl IpcResponse for PageImage {
     }
 }
 
+/// Which image of a page the agent wants.
+#[derive(Clone, Copy, Debug, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PageVariant {
+    /// The finished page, translation burned in.
+    Translated,
+    /// Source plus inpainting and paint, with no text at all.
+    ///
+    /// The published reader shows this one and lays the translation over it as
+    /// real HTML, which is what makes a chapter indexable.
+    Clean,
+}
+
 /// Render one page of the open project and return it as PNG bytes.
 ///
 /// Per page, not per project: the agent uploads each page as it finishes, so
 /// an interrupted chapter resumes from the pages that were not done rather
 /// than starting again. The bytes come back to the webview because the
-/// watermark and SEO overlay are baked there before upload.
+/// watermark is baked there before upload.
 #[tracing::instrument(
     target = "koharu_metrics",
     name = "export",
     skip_all,
-    fields(origin = "farm", format = "png"),
+    fields(origin = "farm", format = "png", variant = ?variant),
 )]
 #[tauri::command]
 #[specta::specta]
 pub(crate) async fn farm_render_page(
     page: EntityId,
+    variant: PageVariant,
     project: State<'_, CurrentProject>,
     desktop: State<'_, Desktop>,
 ) -> std::result::Result<PageImage, Error> {
@@ -149,7 +163,11 @@ pub(crate) async fn farm_render_page(
         project.as_ref().context("no project is open")?.snapshot()
     };
     snapshot.page(page)?;
-    let frame = desktop.renderer().render(&snapshot, page).await?;
+    let renderer = desktop.renderer();
+    let frame = match variant {
+        PageVariant::Translated => renderer.render(&snapshot, page).await?,
+        PageVariant::Clean => renderer.render_without_text(&snapshot, page).await?,
+    };
     let rasterizer = desktop.rasterizer().await?;
     let bytes = tokio_rayon::spawn(move || -> anyhow::Result<Vec<u8>> {
         let image = rasterizer
