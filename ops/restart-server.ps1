@@ -20,9 +20,14 @@ param(
   # single page. Low enough to stay in one script, high enough to read naturally.
   [double] $Temperature = 0.5,
 
-  # Upstream's prompt already forbids leaving source text untranslated, but says
-  # nothing about numerals, and Thai has its own digits.
-  [string] $Instructions = "- Write numbers with Western digits (0-9), exactly as the source writes them. Do not convert them to the target language's own numeral system.",
+  # Pinned translation rules. They live in ops/instructions.txt, not in this
+  # parameter, because they have to contain Thai and Japanese: this file is
+  # ASCII-only on purpose (PowerShell 5.1 reads a BOM-less .ps1 as ANSI and a
+  # non-ASCII literal here would break the relaunch path), while the text file
+  # is read back with an explicit UTF-8 decode and survives intact.
+  #
+  # Blank means "read the file". Pass a value only to override it for one run.
+  [string] $Instructions = "",
 
   # The agent's website credentials. Blank leaves whatever is already stored,
   # so the normal restart does not need the token on the command line. The
@@ -36,6 +41,19 @@ param(
 
 $ErrorActionPreference = "Continue"
 $base = "http://127.0.0.1:$Port"
+
+if ($Instructions -eq "") {
+  $instructionsFile = Join-Path $PSScriptRoot "instructions.txt"
+  if (-not (Test-Path $instructionsFile)) {
+    Write-Host "NOT FOUND: $instructionsFile"
+    exit 1
+  }
+  # -Encoding UTF8 is the whole point: without it PowerShell 5.1 decodes the
+  # file as ANSI and every Thai and Japanese character becomes mojibake, which
+  # the model would then be asked to follow as a rule.
+  $Instructions = (Get-Content -Raw -Encoding UTF8 -Path $instructionsFile).Trim()
+  if ($Instructions -eq "") { Write-Host "EMPTY: $instructionsFile"; exit 1 }
+}
 
 if (-not (Test-Path $Exe)) { Write-Host "NOT FOUND: $Exe"; exit 1 }
 Write-Host ("koharu.exe LastWriteTime: " + (Get-Item $Exe).LastWriteTime)
@@ -73,8 +91,10 @@ if ($AgentToken -ne "" -or $AgentId -ne "") {
   if ($AgentToken -ne "") { $credentials.token = $AgentToken }
   if ($AgentId -ne "")    { $credentials.agentId = $AgentId }
   try {
-    $stored = Invoke-RestMethod "$base/agent/credentials" -Method Put -ContentType "application/json" `
-      -Body ($credentials | ConvertTo-Json -Compress) -TimeoutSec 30
+    $stored = Invoke-RestMethod "$base/agent/credentials" -Method Put `
+      -ContentType "application/json; charset=utf-8" `
+      -Body ([System.Text.Encoding]::UTF8.GetBytes(($credentials | ConvertTo-Json -Compress))) `
+      -TimeoutSec 30
     # The surface never returns the token, only whether one is held.
     Write-Host ("agent credentials -> agentId=" + $stored.agentId + " hasToken=" + $stored.hasToken)
   } catch {
@@ -93,9 +113,14 @@ $payload = @{
   reasoning    = $false
   instructions = $Instructions
 }
-$body = $payload | ConvertTo-Json -Compress
+# As UTF-8 bytes, not as a string. PowerShell 5.1's ConvertTo-Json leaves
+# non-ASCII characters raw rather than escaping them, and Invoke-RestMethod
+# then encodes a string body as ASCII - every Thai and Japanese character in
+# the rules arrives at koharu as a literal "?", and the model is asked to obey
+# a rule about "????". Verified: this is what happened on the first attempt.
+$body = [System.Text.Encoding]::UTF8.GetBytes(($payload | ConvertTo-Json -Compress))
 try {
-  $current = Invoke-RestMethod "$base/llm/current" -Method Put -ContentType "application/json" -Body $body -TimeoutSec 60
+  $current = Invoke-RestMethod "$base/llm/current" -Method Put -ContentType "application/json; charset=utf-8" -Body $body -TimeoutSec 60
   Write-Host ("pinned -> provider=" + $current.provider + " model=" + $current.model)
 } catch {
   Write-Host ("PIN FAILED: " + $_.Exception.Message)

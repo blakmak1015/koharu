@@ -179,6 +179,38 @@ function awaitJob(jobId: string, onProgress?: (done: number, total: number) => v
   })
 }
 
+// --- quality ------------------------------------------------------------------
+
+/**
+ * A Thai politeness particle the model hedged on, e.g. "ครับ/ค่ะ".
+ *
+ * It writes one when it cannot tell the speaker's gender, and readers notice
+ * this before any other defect. The pinned rules forbid it, so every hit here
+ * is a rule the model did not follow.
+ */
+const HEDGE = /ครับ\s*\/\s*ค่ะ|ค่ะ\s*\/\s*ครับ|คะ\s*\/\s*ครับ|ครับ\s*\/\s*คะ/
+
+/**
+ * Count hedges in a finished chapter and log the rate.
+ *
+ * The farm runs with its window hidden and uploads straight to the website,
+ * so without this nobody sees the defect until a reader complains. A number
+ * in the log per chapter is what makes a prompt change measurable.
+ */
+function reportHedges(pages: CompletePage[]): void {
+  let total = 0
+  let hedged = 0
+  for (const page of pages) {
+    for (const block of page.textBlocks ?? []) {
+      total += 1
+      if (HEDGE.test(block.text)) hedged += 1
+    }
+  }
+  if (total === 0) return
+  const rate = ((hedged / total) * 100).toFixed(1)
+  log(`particle hedges: ${hedged}/${total} blocks (${rate}%)`)
+}
+
 // --- glossary -----------------------------------------------------------------
 
 /**
@@ -294,6 +326,7 @@ async function processClaim(claim: ClaimedJob): Promise<void> {
     uploaded.sort((left, right) => left.pageNumber - right.pageNumber)
 
     publish({ status: 'uploading' })
+    reportHedges(uploaded)
     log('completing job...')
     await completeJob(job.id, uploaded, log)
     log(`job ${job.id} completed`)
