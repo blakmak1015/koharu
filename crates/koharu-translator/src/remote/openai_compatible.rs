@@ -70,6 +70,15 @@ pub(super) async fn translate(
         reasoning_effort: generation
             .reasoning
             .map(|enabled| if enabled { "medium" } else { "none" }),
+        // Fork: llama.cpp ignores `reasoning_effort`. Measured against our own
+        // server (Gemma-4-E4B, build b9401): with `reasoning_effort: "none"` the
+        // model still emits `reasoning_content`, exhausts `max_tokens`, and
+        // returns truncated JSON (`finish_reason: "length"`); with
+        // `enable_thinking: false` it returns complete JSON and stops cleanly.
+        // Templates that do not define the variable ignore the field.
+        chat_template_kwargs: generation.reasoning.and_then(|enabled| {
+            (!enabled).then(|| serde_json::json!({ "enable_thinking": false }))
+        }),
         response_format: ResponseFormat {
             kind: "json_schema",
             json_schema: JsonSchema {
@@ -149,6 +158,10 @@ struct ChatRequest<'a> {
     presence_penalty: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<&'static str>,
+    /// Fork: extra Jinja chat-template arguments forwarded verbatim. llama.cpp
+    /// honours `enable_thinking` here but ignores `reasoning_effort`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chat_template_kwargs: Option<serde_json::Value>,
     response_format: ResponseFormat,
 }
 
@@ -249,6 +262,7 @@ mod tests {
             frequency_penalty: None,
             presence_penalty: None,
             reasoning_effort: Some("none"),
+            chat_template_kwargs: Some(serde_json::json!({ "enable_thinking": false })),
             response_format: ResponseFormat {
                 kind: "json_schema",
                 json_schema: JsonSchema {
@@ -262,12 +276,51 @@ mod tests {
 
         assert_eq!(value["max_tokens"], 1024);
         assert_eq!(value["reasoning_effort"], "none");
+        assert_eq!(value["chat_template_kwargs"]["enable_thinking"], false);
         assert_eq!(value["response_format"]["type"], "json_schema");
         assert_eq!(value["response_format"]["json_schema"]["strict"], true);
         assert_eq!(
             value["response_format"]["json_schema"]["schema"]["properties"]["translations"]["maxItems"],
             2
         );
+    }
+
+    /// Hosted OpenAI-compatible APIs reject unknown fields, so the kwarg must
+    /// vanish entirely rather than serialize as null.
+    #[test]
+    fn omits_chat_template_kwargs_when_reasoning_is_left_to_the_server() {
+        let body = ChatRequest {
+            model: "model",
+            messages: [
+                Message {
+                    role: "system",
+                    content: MessageContent::Text("system".to_owned()),
+                },
+                Message {
+                    role: "user",
+                    content: MessageContent::Text("user".to_owned()),
+                },
+            ],
+            temperature: None,
+            top_p: None,
+            max_tokens: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            reasoning_effort: None,
+            chat_template_kwargs: None,
+            response_format: ResponseFormat {
+                kind: "json_schema",
+                json_schema: JsonSchema {
+                    name: "manga_translation",
+                    strict: true,
+                    schema: prompt::output_schema(1),
+                },
+            },
+        };
+        let value = serde_json::to_value(body).unwrap();
+
+        assert!(value.get("chat_template_kwargs").is_none());
+        assert!(value.get("reasoning_effort").is_none());
     }
 
     #[test]
