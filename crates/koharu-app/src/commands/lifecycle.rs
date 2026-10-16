@@ -411,22 +411,26 @@ pub(crate) async fn import(
     let Some(files) = files else {
         return Ok(());
     };
-    add_pages(files, &desktop, &project, &processing, &canvas_channel).await
+    add_pages(files, &desktop, &project, &processing, &canvas_channel)
+        .await
+        .map(|_| ())
 }
 
-/// Decode `files` and append them to the open project as pages.
+/// Decode `files` and append them to the open project as pages, returning the
+/// new pages in the order they were added.
 ///
 /// Fork: extracted from `import` so the unattended farm can add pages without
 /// a file dialog. Everything below this line is upstream's import path
 /// unchanged — sharing it rather than copying it keeps the two callers from
-/// drifting when upstream changes how a page is built.
+/// drifting when upstream changes how a page is built. The ids are returned
+/// because the agent drives one page at a time and has to name them.
 pub(crate) async fn add_pages(
     files: Vec<std::path::PathBuf>,
     desktop: &Desktop,
     project: &CurrentProject,
     processing: &Processing,
     canvas_channel: &CanvasChannel,
-) -> std::result::Result<(), Error> {
+) -> std::result::Result<Vec<koharu_scene::EntityId>, Error> {
     if !processing.stops.lock().is_empty() {
         return Err(anyhow::anyhow!("pages cannot be imported while processing is running").into());
     }
@@ -436,6 +440,7 @@ pub(crate) async fn add_pages(
     let pages = tokio_rayon::spawn(move || import::import(files)).await?;
     let page_count = pages.len();
 
+    let mut added = Vec::with_capacity(page_count);
     let (commit, page) = {
         let mut project = project.project.lock().await;
         let project = project.as_mut().context("no project is open")?;
@@ -450,6 +455,7 @@ pub(crate) async fn add_pages(
                     ),
                     At::End,
                 )?;
+                added.push(page);
                 edit.set_asset(
                     page,
                     &source,
@@ -476,7 +482,7 @@ pub(crate) async fn add_pages(
     let canvas = desktop.canvas_state();
     canvas_channel.channel.publish(canvas);
     tracing::info!(target: "koharu_metrics", metric = "page_imported", page_count);
-    Ok(())
+    Ok(added)
 }
 
 #[tracing::instrument(

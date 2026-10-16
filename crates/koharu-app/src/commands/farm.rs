@@ -12,19 +12,21 @@
 //! Codex integration and have nothing to do with the translation agent here.
 
 use anyhow::Context as _;
+use image::{
+    ExtendedColorType, ImageEncoder as _,
+    codecs::png::{CompressionType, FilterType, PngEncoder},
+};
 use koharu_desktop::Desktop;
+use koharu_rasterizer::RasterOptions;
+use koharu_scene::EntityId;
 use koharu_secrets::{ExposeSecret as _, SecretString};
 use serde::Serialize;
 use specta::Type;
 use std::path::PathBuf;
-use tauri::State;
+use tauri::{State, ipc::IpcResponse};
 
 use super::{
-    Error,
-    canvas::CanvasChannel,
-    lifecycle::add_pages,
-    output::{ExportFormat, write_export},
-    processing::Processing,
+    Error, canvas::CanvasChannel, lifecycle::add_pages, processing::Processing,
     project::CurrentProject,
 };
 
@@ -80,7 +82,8 @@ fn read_credentials() -> anyhow::Result<AgentCredentials> {
     Ok(AgentCredentials { token, agent_id })
 }
 
-/// Append pages to the open project from paths the caller already has.
+/// Append pages to the open project from paths the caller already has, and
+/// return the new page ids in order.
 ///
 /// The agent downloads raw pages to a scratch directory and passes the paths
 /// here. Missing paths are rejected up front: a silently short import would
@@ -99,7 +102,7 @@ pub(crate) async fn farm_import_pages(
     project: State<'_, CurrentProject>,
     processing: State<'_, Processing>,
     canvas_channel: State<'_, CanvasChannel>,
-) -> std::result::Result<(), Error> {
+) -> std::result::Result<Vec<EntityId>, Error> {
     if paths.is_empty() {
         return Err(anyhow::anyhow!("no pages were given to import").into());
     }
@@ -109,48 +112,62 @@ pub(crate) async fn farm_import_pages(
     add_pages(paths, &desktop, &project, &processing, &canvas_channel).await
 }
 
-/// Render every page of the open project into `destination`.
+/// PNG bytes, returned over the raw IPC body rather than as a JSON number
+/// array — the same path `get_thumbnail` uses, and the reason a whole page is
+/// cheap to hand to the webview.
+#[derive(Type)]
+#[specta(transparent)]
+pub(crate) struct PageImage(#[specta(type = Vec<u8>)] Vec<u8>);
+
+impl IpcResponse for PageImage {
+    fn body(self) -> tauri::Result<tauri::ipc::InvokeResponseBody> {
+        Ok(self.0.into())
+    }
+}
+
+/// Render one page of the open project and return it as PNG bytes.
 ///
-/// `destination` is a directory for `png` and `psd`, and the archive path
-/// itself for `cbz`, matching what upstream's dialog would have returned.
+/// Per page, not per project: the agent uploads each page as it finishes, so
+/// an interrupted chapter resumes from the pages that were not done rather
+/// than starting again. The bytes come back to the webview because the
+/// watermark and SEO overlay are baked there before upload.
 #[tracing::instrument(
     target = "koharu_metrics",
     name = "export",
     skip_all,
-    fields(origin = "farm", format = ?format),
+    fields(origin = "farm", format = "png"),
 )]
 #[tauri::command]
 #[specta::specta]
-pub(crate) async fn farm_export_pages(
-    destination: PathBuf,
-    format: ExportFormat,
+pub(crate) async fn farm_render_page(
+    page: EntityId,
     project: State<'_, CurrentProject>,
     desktop: State<'_, Desktop>,
-) -> std::result::Result<(), Error> {
+) -> std::result::Result<PageImage, Error> {
     let snapshot = {
         let project = project.project.lock().await;
-        project
-            .as_ref()
-            .context("no project is open")?
-            .snapshot()
+        project.as_ref().context("no project is open")?.snapshot()
     };
-    let pages = snapshot.pages().map(|page| page.id()).collect::<Vec<_>>();
-    if pages.is_empty() {
-        return Err(anyhow::anyhow!("there are no pages to export").into());
-    }
-    // Upstream's dialog guarantees the parent exists; here nothing does.
-    match format {
-        ExportFormat::Png | ExportFormat::Psd => std::fs::create_dir_all(&destination)
-            .with_context(|| format!("failed to create {}", destination.display()))?,
-        ExportFormat::Cbz => {
-            let parent = destination
-                .parent()
-                .context("the archive path has no parent directory")?;
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
-        }
-    }
-    write_export(format, destination, &desktop, snapshot, pages).await
+    snapshot.page(page)?;
+    let frame = desktop.renderer().render(&snapshot, page).await?;
+    let rasterizer = desktop.rasterizer().await?;
+    let bytes = tokio_rayon::spawn(move || -> anyhow::Result<Vec<u8>> {
+        let image = rasterizer
+            .rasterize(&frame.raster_frame()?, RasterOptions::default())?
+            .image;
+        let mut bytes = Vec::new();
+        PngEncoder::new_with_quality(&mut bytes, CompressionType::Best, FilterType::Adaptive)
+            .write_image(
+                image.as_raw(),
+                image.width(),
+                image.height(),
+                ExtendedColorType::Rgba8,
+            )?;
+        Ok(bytes)
+    })
+    .await?;
+    tracing::info!(target: "koharu_metrics", metric = "page_exported", format = "png");
+    Ok(PageImage(bytes))
 }
 
 /// Read this instance's agent credentials.

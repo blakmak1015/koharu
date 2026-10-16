@@ -77,20 +77,23 @@ export const commands = {
 	commitTransform: (expectedRevision: Revision, elements: TransformFrame[]) => __TAURI_INVOKE<number | null>("commit_transform", { expectedRevision, elements }).then((v) => (v==null?v:v as typeof v)),
 	commitInpaint: (expectedRevision: Revision, points: Point[], diameter: number) => __TAURI_INVOKE<string | null>("commit_inpaint", { expectedRevision, points: points.map(i=>i), diameter }),
 	/**
-	 *  Append pages to the open project from paths the caller already has.
+	 *  Append pages to the open project from paths the caller already has, and
+	 *  return the new page ids in order.
 	 * 
 	 *  The agent downloads raw pages to a scratch directory and passes the paths
 	 *  here. Missing paths are rejected up front: a silently short import would
 	 *  produce a chapter with pages missing, which is worse than a failed job.
 	 */
-	farmImportPages: (paths: string[]) => __TAURI_INVOKE<null>("farm_import_pages", { paths }),
+	farmImportPages: (paths: string[]) => __TAURI_INVOKE<EntityId[]>("farm_import_pages", { paths }),
 	/**
-	 *  Render every page of the open project into `destination`.
+	 *  Render one page of the open project and return it as PNG bytes.
 	 * 
-	 *  `destination` is a directory for `png` and `psd`, and the archive path
-	 *  itself for `cbz`, matching what upstream's dialog would have returned.
+	 *  Per page, not per project: the agent uploads each page as it finishes, so
+	 *  an interrupted chapter resumes from the pages that were not done rather
+	 *  than starting again. The bytes come back to the webview because the
+	 *  watermark and SEO overlay are baked there before upload.
 	 */
-	farmExportPages: (destination: string, format: ExportFormat) => __TAURI_INVOKE<null>("farm_export_pages", { destination, format }),
+	farmRenderPage: (page: EntityId) => __TAURI_INVOKE<PageImage>("farm_render_page", { page }),
 	/**  Read this instance's agent credentials. */
 	farmGetAgentCredentials: () => __TAURI_INVOKE<AgentCredentials>("farm_get_agent_credentials"),
 	/**
@@ -395,6 +398,13 @@ export type Page = {
 	layers: Layer[],
 	regions: AnalysisRegion[],
 };
+
+/**
+ *  PNG bytes, returned over the raw IPC body rather than as a JSON number
+ *  array — the same path `get_thumbnail` uses, and the reason a whole page is
+ *  cheap to hand to the webview.
+ */
+export type PageImage = number[];
 
 export type PageImportSource = "files" | "folder";
 

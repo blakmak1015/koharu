@@ -110,7 +110,7 @@ pub fn bindings() -> tauri_specta::Builder<tauri_runtime_cef::CefRuntime> {
             canvas::commit_inpaint,
             // Fork: the unattended farm's headless surface.
             farm::farm_import_pages,
-            farm::farm_export_pages,
+            farm::farm_render_page,
             farm::farm_get_agent_credentials,
             farm::farm_set_agent_credentials,
             farm::farm_clear_agent_credentials,

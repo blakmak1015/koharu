@@ -75,21 +75,6 @@ pub(crate) async fn export(
     let Some(destination) = destination.map(|destination| destination.path().to_owned()) else {
         return Ok(());
     };
-    write_export(format, destination, &desktop, snapshot, pages).await
-}
-
-/// Render every page and write it to `destination`.
-///
-/// Fork: extracted from `export` so the unattended farm can write results
-/// without a save dialog. The body is upstream's unchanged; sharing it keeps
-/// the two callers from drifting.
-pub(crate) async fn write_export(
-    format: ExportFormat,
-    destination: std::path::PathBuf,
-    desktop: &Desktop,
-    snapshot: Snapshot,
-    pages: Vec<EntityId>,
-) -> std::result::Result<(), Error> {
     let renderer = desktop.renderer();
     let rasterizer = desktop.rasterizer().await?;
     let frames = try_join_all(pages.iter().map(|&page| renderer.render(&snapshot, page))).await?;
