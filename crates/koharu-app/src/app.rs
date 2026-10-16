@@ -169,13 +169,16 @@ pub fn run(context: tauri::Context<CefRuntime>) -> Result<()> {
             let window = tauri::WebviewWindowBuilder::from_config(application, window_config)?
                 .build()
                 .context("failed to create the main window")?;
-            // Fork: the farm instance starts hidden. The webview still loads, so
-            // the auto-started translation agent runs; re-launching the
-            // executable brings the window back.
-            if background_mode() {
-                tracing::info!("background mode: starting with the window hidden");
-            } else {
-                window.show().context("failed to show the main window")?;
+            // Fork: the farm instance starts minimised rather than hidden.
+            //
+            // Hidden works - the webview loads either way, so the agent runs -
+            // but it leaves nothing in the taskbar, and an operator who wants
+            // to look at the panel has no way in short of relaunching the
+            // executable. Minimised keeps it one click away and still out of
+            // the way, and a minimised window is not composited, so it costs
+            // no GPU memory on a card the pipeline has already filled.
+            window.show().context("failed to show the main window")?;
+            if !background_mode() {
                 window
                     .set_focus()
                     .context("failed to focus the main window")?;
@@ -183,12 +186,23 @@ pub fn run(context: tauri::Context<CefRuntime>) -> Result<()> {
 
             let initialization_handle = handle.clone();
             let initialization_readiness = readiness.clone();
+            let initialization_window = window.clone();
             drop(tauri::async_runtime::spawn(async move {
                 initialize(initialization_handle.clone())
                     .await
                     .expect("failed to initialize the desktop runtime");
                 initialization_handle.state::<Initialization>().ready();
                 initialization_readiness.mark_ready();
+                // Minimised here, not at creation: `tauri_plugin_window_state`
+                // restores the saved size, position, maximised and fullscreen
+                // state after the window is built, and that restore undoes an
+                // earlier minimise. Measured - the window came up full size
+                // with the log already saying it had been minimised.
+                if background_mode()
+                    && let Err(error) = initialization_window.minimize()
+                {
+                    tracing::warn!(%error, "could not minimise the farm window");
+                }
             }));
 
             let mut downloads = koharu_runtime::download::subscribe();
@@ -287,13 +301,15 @@ pub fn run(context: tauri::Context<CefRuntime>) -> Result<()> {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // Fork: in background mode closing only hides the window, so a stray
-            // click cannot end a running batch. Interactive use keeps upstream's
-            // behaviour, where closing the window shuts the application down.
+            // Fork: in background mode closing minimises instead, so a stray
+            // click cannot end a running batch. Minimise rather than hide:
+            // the window started in the taskbar, and hiding it would take
+            // away the only way back to the panel. Interactive use keeps
+            // upstream's behaviour, where closing shuts the application down.
             if let WindowEvent::CloseRequested { api, .. } = event
                 && background_mode()
             {
-                let _ = window.hide();
+                let _ = window.minimize();
                 api.prevent_close();
                 return;
             }
@@ -318,14 +334,14 @@ pub fn run(context: tauri::Context<CefRuntime>) -> Result<()> {
 
 /// Background mode: the unattended translation-farm instance.
 ///
-/// Set by `ops/restart-server.ps1`. In this mode the window starts hidden and
-/// closing it only hides it again, so a stray click cannot end a running batch.
-/// Re-launching the executable brings the window back through
-/// `tauri_plugin_single_instance`; the supervisor script stops the process.
+/// Set by `ops/restart-server.ps1`. In this mode the window starts minimised
+/// and closing it minimises it again, so a stray click cannot end a running
+/// batch while the panel stays one click away in the taskbar. The supervisor
+/// script is what stops the process.
 ///
-/// Tauri 3.0.0-alpha.1's `tray-icon` feature requires `tray-icon ^0.25`, which
-/// is not published, so the 0.59.2 fork's tray menu has no equivalent here yet.
-/// Revisit when that dependency lands.
+/// The taskbar entry is standing in for a tray icon: Tauri 3.0.0-alpha.1's
+/// `tray-icon` feature wants `tray-icon ^0.25`, which is not published, so the
+/// 0.59.2 fork's tray menu has no equivalent here yet.
 pub(crate) fn background_mode() -> bool {
     std::env::var("KOHARU_TRAY_START").is_ok_and(|value| value.trim() == "1")
 }

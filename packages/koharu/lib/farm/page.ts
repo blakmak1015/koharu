@@ -43,22 +43,37 @@ function bounds(points: { x: number; y: number }[]): { x: number; y: number; w: 
  */
 export async function pageTextBlocks(
   pageId: string,
+  log?: (message: string) => void,
 ): Promise<{ textBlocks: TextBlock[]; width: number; height: number }> {
   let page: Page
   try {
     page = await commands.farmGetPage(pageId)
-  } catch {
+  } catch (error) {
+    // Never silently: an empty result here costs the published chapter its
+    // HTML text overlay, and the first time it happened nothing said so.
+    log?.(`could not read page ${pageId}: ${String(error)}`)
     return { textBlocks: [], width: 0, height: 0 }
   }
   const width = page.size.width
   const height = page.size.height
-  if (!(width > 0 && height > 0)) return { textBlocks: [], width: 0, height: 0 }
+  if (!(width > 0 && height > 0)) {
+    log?.(`page ${pageId} has no size (${width}x${height})`)
+    return { textBlocks: [], width: 0, height: 0 }
+  }
 
+  const counts = { layers: 0, text: 0, visible: 0, geometry: 0, translated: 0 }
   const textBlocks: TextBlock[] = []
   for (const layer of page.layers as Layer[]) {
-    if (layer.type !== 'text' || !layer.visibility.visible || !layer.geometry) continue
+    counts.layers += 1
+    if (layer.type !== 'text') continue
+    counts.text += 1
+    if (!layer.visibility.visible) continue
+    counts.visible += 1
+    if (!layer.geometry) continue
+    counts.geometry += 1
     const text = layer.content.translation?.text?.trim()
     if (!text) continue
+    counts.translated += 1
     const box = bounds(layer.geometry.points)
     if (box.w <= 0 || box.h <= 0) continue
     const sourceText = layer.content.source?.text?.trim()
@@ -78,6 +93,12 @@ export async function pageTextBlocks(
       // when a block is not horizontal.
       direction: layer.typography?.writing_mode === 'Vertical' ? 'vertical' : 'horizontal',
     })
+  }
+  if (textBlocks.length === 0) {
+    log?.(
+      `page ${pageId}: no text blocks — layers ${counts.layers}, text ${counts.text}, ` +
+        `visible ${counts.visible}, with geometry ${counts.geometry}, translated ${counts.translated}`,
+    )
   }
   return { textBlocks, width, height }
 }

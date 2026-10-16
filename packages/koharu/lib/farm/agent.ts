@@ -179,6 +179,31 @@ function awaitJob(jobId: string, onProgress?: (done: number, total: number) => v
   })
 }
 
+// --- one chapter's project ------------------------------------------------------
+
+/**
+ * Create the chapter's project, replacing a leftover one of the same name.
+ *
+ * A project is named after its job, so a job that comes back round - the
+ * process died mid-chapter and the lease expired - meets the half-written
+ * directory its previous attempt left behind, and `create_project` refuses
+ * with "project already contains a state". The job would then fail for ever.
+ *
+ * Deleting is safe by construction: the name encodes this job, every page is
+ * downloaded again, and nothing has been uploaded for it yet.
+ */
+async function createProjectFresh(name: string): Promise<void> {
+  log('creating project...')
+  try {
+    await commands.createProject(name)
+    return
+  } catch (error) {
+    log(`project ${name} already exists (${reason(error)}) — replacing it`)
+  }
+  await commands.deleteProject(name)
+  await commands.createProject(name)
+}
+
 // --- quality ------------------------------------------------------------------
 
 /**
@@ -283,7 +308,7 @@ async function uploadFinishedPage(
     log(`clean image for page ${pageNumber} skipped: ${reason(error)}`)
   }
 
-  const { textBlocks, width, height } = await pageTextBlocks(pageId)
+  const { textBlocks, width, height } = await pageTextBlocks(pageId, log)
   if (textBlocks.length) {
     entry.textBlocks = textBlocks
     entry.pageWidth = width
@@ -312,8 +337,7 @@ async function processClaim(claim: ClaimedJob): Promise<void> {
     }
 
     publish({ status: 'processing' })
-    log('creating project...')
-    await commands.createProject(`agent-${job.id.slice(0, 8)}`)
+    await createProjectFresh(`agent-${job.id.slice(0, 8)}`)
     log(`downloading ${remaining.length} source page(s)...`)
     const pageIds = await commands.farmImportPages(
       remaining.map((page) => ({ url: sourceUrl(page), name: `${page.pageNumber}.png` })),
