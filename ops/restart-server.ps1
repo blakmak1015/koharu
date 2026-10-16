@@ -4,14 +4,15 @@
 #   * the in-app HTTP API is gone, so this talks to the fork's own control
 #     surface (crates/koharu-control) instead of /api/v1/*;
 #   * port 4000 now belongs to CEF's remote debugging endpoint in debug builds,
-#     so the control surface listens on 4100.
+#     and 4100 is the website's editor gateway, so the control surface listens
+#     on 4190.
 #
 # Pinning the model is not optional: an instance that starts on the default
 # local provider silently translates to the wrong language.
 
 param(
   [string] $Exe      = "C:\Users\blakm\koharu-port\target\release\koharu.exe",
-  [int]    $Port     = 4100,
+  [int]    $Port     = 4190,
   [string] $Provider = "openai-compatible",
   [string] $Model    = "Gemma-4-E4B-Uncensored-HauhauCS-Aggressive-Q5_K_M.gguf",
 

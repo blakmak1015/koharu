@@ -100,6 +100,27 @@ export async function fetchDeadline(
 
 export const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
+/**
+ * Describe whatever was thrown.
+ *
+ * Tauri commands reject with the serialized error, which for this app is a
+ * plain string — reading `.message` off it yields `undefined`, and the first
+ * live run spent its pipeline failures reporting exactly that instead of the
+ * reason. Anything can be thrown in JavaScript; this handles that.
+ */
+export function reason(error: unknown): string {
+  if (typeof error === 'string') return error
+  if (error instanceof Error) return error.message
+  if (error && typeof error === 'object' && 'message' in error) {
+    return String((error as { message: unknown }).message)
+  }
+  try {
+    return JSON.stringify(error) ?? String(error)
+  } catch {
+    return String(error)
+  }
+}
+
 /** Credentials are read per call so a change in the panel takes effect at once. */
 async function agentFetch(
   path: string,
@@ -138,7 +159,7 @@ export async function claimJob(log?: Logger): Promise<ClaimResponse> {
     return JSON.parse(raw) as ClaimResponse
   } catch (error) {
     log?.(`claim response was not JSON (${raw.length} bytes): ${raw.slice(0, 300)}`)
-    throw new Error(`claim response not JSON: ${(error as Error).message}`)
+    throw new Error(`claim response not JSON: ${reason(error)}`)
   }
 }
 
@@ -201,21 +222,21 @@ export async function completeJob(jobId: string, pages: CompletePage[], log?: Lo
   }
 }
 
-export async function failJob(jobId: string, reason: string, log?: Logger): Promise<void> {
+export async function failJob(jobId: string, message: string, log?: Logger): Promise<void> {
   try {
     await agentFetch(
       '/api/admin/translation/agent/fail',
       {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ jobId, error: reason.slice(0, 1000) }),
+        body: JSON.stringify({ jobId, error: message.slice(0, 1000) }),
       },
       30_000,
       2,
       log,
     )
   } catch (error) {
-    log?.(`failed to report job failure to the website: ${(error as Error).message}`)
+    log?.(`failed to report job failure to the website: ${reason(error)}`)
   }
 }
 

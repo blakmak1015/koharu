@@ -77,6 +77,15 @@ export const commands = {
 	commitTransform: (expectedRevision: Revision, elements: TransformFrame[]) => __TAURI_INVOKE<number | null>("commit_transform", { expectedRevision, elements }).then((v) => (v==null?v:v as typeof v)),
 	commitInpaint: (expectedRevision: Revision, points: Point[], diameter: number) => __TAURI_INVOKE<string | null>("commit_inpaint", { expectedRevision, points: points.map(i=>i), diameter }),
 	/**
+	 *  Write one agent log line to the application log.
+	 * 
+	 *  The agent runs in the webview, and the farm instance's window is hidden, so
+	 *  its own log is somewhere nobody can read. Without this an idle agent and a
+	 *  broken one look exactly alike from outside — which is how the first live
+	 *  run was spent guessing.
+	 */
+	farmLog: (message: string) => __TAURI_INVOKE<null>("farm_log", { message }),
+	/**
 	 *  Download the chapter's source pages and append them to the open project,
 	 *  returning the new page ids in order.
 	 * 

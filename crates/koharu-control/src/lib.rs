@@ -33,9 +33,11 @@ use tokio::{
 /// Environment variable that both enables the surface and selects its port.
 pub const PORT_VARIABLE: &str = "KOHARU_CONTROL_PORT";
 
-/// Upstream debug builds bind CEF's remote debugging endpoint to 4000, which is
-/// where this fork's HTTP API used to live, so the supervisors move off it.
-pub const SUGGESTED_PORT: u16 = 4100;
+/// Neither 4000 nor 4100 is available: upstream debug builds bind CEF's
+/// remote debugging endpoint to 4000, where this fork's HTTP API used to live,
+/// and 4100 belongs to the website's editor gateway, which runs on the same
+/// machine as the farm.
+pub const SUGGESTED_PORT: u16 = 4190;
 
 /// Caps both the header block and the declared body length. Requests here are a
 /// few hundred bytes; anything larger is a mistake or an abuse.

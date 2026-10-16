@@ -9,7 +9,7 @@
 // fork had to work around by hand.
 
 import { commands } from '@koharu/bridge/protocol'
-import type { EntityId, Job, Stage } from '@koharu/bridge/protocol'
+import type { EntityId, Job } from '@koharu/bridge/protocol'
 import { relaunch } from '@tauri-apps/plugin-process'
 
 import { useKoharuStore } from '../store'
@@ -20,6 +20,7 @@ import {
   completeJob,
   delay,
   failJob,
+  reason,
   sendHeartbeat,
   sourceUrl,
   uploadPage,
@@ -47,16 +48,6 @@ export type AgentState = {
 }
 
 export type AgentSettings = {
-  /** Pages in flight on this machine. */
-  localConcurrency: number
-  /** Pages translating on the shared LLM box at once. */
-  llmConcurrency: number
-  /**
-   * Run detect / translate+inpaint / render as stations so this GPU and the
-   * LLM box work on different pages at the same time. Off = one page start to
-   * finish, which is the old behaviour.
-   */
-  assemblyLine: boolean
   watermarkCorner: WatermarkCorner
   /**
    * Restart the process after this many chapters. The pipeline's caching
@@ -68,9 +59,6 @@ export type AgentSettings = {
 }
 
 export const defaultAgentSettings: AgentSettings = {
-  localConcurrency: 1,
-  llmConcurrency: 2,
-  assemblyLine: true,
   watermarkCorner: 'top-right',
   recycleAfterChapters: 0,
 }
@@ -78,7 +66,8 @@ export const defaultAgentSettings: AgentSettings = {
 const IDLE_WAIT_MS = 15_000
 const ERROR_WAIT_MS = 30_000
 const HEARTBEAT_MS = 30_000
-const JOB_TIMEOUT_MS = 600_000
+// A stage can legitimately take minutes; this bounds silence, not work.
+const STALL_TIMEOUT_MS = 600_000
 
 // --- state ------------------------------------------------------------------
 
@@ -101,6 +90,10 @@ function publish(patch: Partial<AgentState>) {
 function log(message: string) {
   const entry = `[${new Date().toLocaleTimeString()}] ${message}`
   publish({ log: [...state.log.slice(-99), entry] })
+  // Also to the application log. The farm instance's window is hidden, so the
+  // panel's copy of this is somewhere nobody can read: without the file, an
+  // idle agent and a broken one look identical from outside.
+  void commands.farmLog(message).catch(() => undefined)
 }
 
 export function getAgentState(): AgentState {
@@ -134,7 +127,7 @@ function throwIfStopped() {
  * the "hangs after one chapter" report. Here the terminal set is the type:
  * anything that is not `running` settles this promise.
  */
-function awaitJob(jobId: string): Promise<Job> {
+function awaitJob(jobId: string, onProgress?: (done: number, total: number) => void): Promise<Job> {
   const settle = (job: Job | undefined) =>
     job && job.state !== 'running'
       ? job.state === 'finished'
@@ -150,13 +143,30 @@ function awaitJob(jobId: string): Promise<Job> {
       else reject(new Error(immediate.error))
       return
     }
+
     let unsubscribe = () => {}
-    const timer = setTimeout(() => {
-      unsubscribe()
-      reject(new Error('pipeline timed out'))
-    }, JOB_TIMEOUT_MS)
+    let timer: ReturnType<typeof setTimeout>
+    // The deadline covers a lack of progress, not the whole job: a chapter of
+    // forty pages takes far longer than any one stage, so a fixed timeout
+    // would have to be either useless or wrong.
+    const extend = () => {
+      clearTimeout(timer)
+      timer = setTimeout(() => {
+        unsubscribe()
+        reject(new Error(`pipeline made no progress for ${STALL_TIMEOUT_MS / 1000}s`))
+      }, STALL_TIMEOUT_MS)
+    }
+    extend()
+
+    let seen = -1
     unsubscribe = useKoharuStore.subscribe((state) => {
-      const outcome = settle(state.jobs[jobId])
+      const job = state.jobs[jobId]
+      if (job && job.completed !== seen) {
+        seen = job.completed
+        extend()
+        onProgress?.(job.completed, job.total)
+      }
+      const outcome = settle(job)
       if (!outcome) return
       clearTimeout(timer)
       unsubscribe()
@@ -164,64 +174,6 @@ function awaitJob(jobId: string): Promise<Job> {
       else reject(new Error(outcome.error))
     })
   })
-}
-
-/**
- * One station of the assembly line, holding its machine's gate only while it
- * runs. A failed stage leaves the page incomplete — untranslated, or with the
- * source text still showing — so it is retried once and then fails loudly
- * rather than publishing a broken page.
- */
-async function runStage(
-  label: string,
-  pageId: EntityId,
-  stages: Stage[],
-  gate: Semaphore,
-  pageNumber: number,
-): Promise<void> {
-  const release = await gate.acquire()
-  try {
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      throwIfStopped()
-      try {
-        const jobId = await commands.process({ scope: 'pages', value: [pageId] }, { operation: 'stages', stages })
-        await awaitJob(jobId)
-        return
-      } catch (error) {
-        const why = (error as Error).message
-        if (attempt === 2) throw new Error(`page ${pageNumber} [${label}] failed twice: ${why}`)
-        log(`page ${pageNumber} [${label}]: ${why} — retrying once`)
-      }
-    }
-  } finally {
-    release()
-  }
-}
-
-/**
- * Bounds how many pages may occupy one station. Permits pass straight from a
- * releaser to the next waiter, so the count cannot drift.
- */
-class Semaphore {
-  private free: number
-  private waiters: (() => void)[] = []
-
-  constructor(limit: number) {
-    this.free = Math.max(1, limit)
-  }
-
-  async acquire(): Promise<() => void> {
-    if (this.free > 0) this.free--
-    else await new Promise<void>((resolve) => this.waiters.push(resolve))
-    let released = false
-    return () => {
-      if (released) return
-      released = true
-      const next = this.waiters.shift()
-      if (next) next()
-      else this.free++
-    }
-  }
 }
 
 // --- one chapter --------------------------------------------------------------
@@ -250,7 +202,7 @@ async function uploadFinishedPage(
       log,
     )
   } catch (error) {
-    log(`clean image for page ${pageNumber} skipped: ${(error as Error).message}`)
+    log(`clean image for page ${pageNumber} skipped: ${reason(error)}`)
   }
 
   const { textBlocks, width, height } = await pageTextBlocks(pageId)
@@ -305,60 +257,47 @@ async function processClaim(claim: ClaimedJob): Promise<void> {
   }
 }
 
+/**
+ * Run the whole chapter through the pipeline, then upload each page.
+ *
+ * One job for every page, not one per page. `process` refuses a second job
+ * while one is running ("another process is already running"), and it refuses
+ * it for good reason: `koharu-pipeline` has its own scheduler that already
+ * runs detection on one page while another is being translated and a third is
+ * inpainted, with backpressure so a fast stage cannot run away from a slow
+ * one. The 0.59.2 agent had to build that overlap by hand because the old
+ * API had no scheduler; here, hand-rolling it is both redundant and refused.
+ */
 async function translatePages(
   job: AgentJob,
   pageIds: EntityId[],
   pages: AgentPage[],
 ): Promise<CompletePage[]> {
-  const localGate = new Semaphore(settings.localConcurrency)
-  const llmGate = new Semaphore(settings.llmConcurrency)
-  // A page waiting on the remote LLM must not hold a local slot, so more page
-  // workers run than either limit: the gates bound each machine, not the pool.
-  const workers = settings.assemblyLine
-    ? settings.localConcurrency + settings.llmConcurrency
-    : settings.localConcurrency
-  if (settings.assemblyLine) {
-    log(
-      `assembly line: ${settings.localConcurrency} local + ${settings.llmConcurrency} translating, ${workers} pages in flight`,
-    )
-  }
-
-  const uploaded: CompletePage[] = []
-  let next = 0
-  const worker = async (): Promise<void> => {
-    for (;;) {
-      throwIfStopped()
-      const index = next++
-      if (index >= pageIds.length) return
-      const pageId = pageIds[index]
-      const pageNumber = pages[index]?.pageNumber ?? index + 1
-      log(`translating page ${pageNumber} (${index + 1}/${pageIds.length})...`)
-
-      if (settings.assemblyLine) {
-        // Inpainting needs the detection masks, not the translation, so the
-        // page is painted on this GPU while it is translated on the other box.
-        await runStage('detect', pageId, ['detection', 'ocr'], localGate, pageNumber)
-        await sendHeartbeat(job.id)
-        await Promise.all([
-          runStage('translate', pageId, ['translation'], llmGate, pageNumber),
-          runStage('inpaint', pageId, ['inpainting'], localGate, pageNumber),
-        ])
-      } else {
-        await runStage(
-          'pipeline',
-          pageId,
-          ['detection', 'ocr', 'translation', 'inpainting'],
-          localGate,
-          pageNumber,
-        )
-      }
-      await sendHeartbeat(job.id)
-
-      uploaded.push(await uploadFinishedPage(job, pageId, pageNumber))
-      log(`uploaded page ${pageNumber} (${uploaded.length}/${pageIds.length})`)
+  log(`running the pipeline over ${pageIds.length} page(s)...`)
+  const jobId = await commands.process(
+    { scope: 'pages', value: pageIds },
+    { operation: 'full' },
+  )
+  let lastBeat = 0
+  await awaitJob(jobId, (done, total) => {
+    log(`pipeline ${done}/${total}`)
+    // The lease has to outlive the whole chapter, and the pipeline can spend
+    // minutes on one page.
+    if (Date.now() - lastBeat > HEARTBEAT_MS) {
+      lastBeat = Date.now()
+      void sendHeartbeat(job.id)
     }
+  })
+
+  publish({ status: 'uploading' })
+  const uploaded: CompletePage[] = []
+  for (const [index, pageId] of pageIds.entries()) {
+    throwIfStopped()
+    const pageNumber = pages[index]?.pageNumber ?? index + 1
+    uploaded.push(await uploadFinishedPage(job, pageId, pageNumber))
+    log(`uploaded page ${pageNumber} (${uploaded.length}/${pageIds.length})`)
+    await sendHeartbeat(job.id)
   }
-  await Promise.all(Array.from({ length: Math.min(workers, pageIds.length) }, worker))
   return uploaded
 }
 
@@ -376,9 +315,9 @@ async function processOneJob(): Promise<boolean> {
     await processClaim(claim)
     return true
   } catch (error) {
-    const reason = (error as Error).message
-    log(`job ${claim.job.id} failed: ${reason}`)
-    await failJob(claim.job.id, reason, log)
+    const why = reason(error)
+    log(`job ${claim.job.id} failed: ${why}`)
+    await failJob(claim.job.id, why, log)
     publish({ currentJob: null })
     throw error
   }
@@ -403,9 +342,9 @@ async function loop(): Promise<void> {
       }
     } catch (error) {
       if (stopped()) return
-      const reason = (error as Error).message
-      publish({ status: 'error', lastError: reason })
-      log(`agent error: ${reason}`)
+      const why = reason(error)
+      publish({ status: 'error', lastError: why })
+      log(`agent error: ${why}`)
       await delay(ERROR_WAIT_MS)
     }
   }

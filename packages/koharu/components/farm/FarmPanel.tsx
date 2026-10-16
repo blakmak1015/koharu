@@ -13,9 +13,10 @@
 import { useCallback, useEffect, useState } from 'react'
 
 import { commands } from '@koharu/bridge/protocol'
+
+import { reason } from '@/lib/farm/website'
 import { Button } from '@koharu/ui/components/button'
 import { Input } from '@koharu/ui/components/input'
-import { Switch } from '@koharu/ui/components/switch'
 
 import {
   getAgentState,
@@ -56,6 +57,9 @@ export function FarmPanel() {
   useEffect(() => {
     const stored = loadAgentSettings()
     setSettings(stored)
+    // Breadcrumbs, not decoration: on the hidden farm instance this is the
+    // only evidence that the panel mounted and what it decided.
+    void commands.farmLog('panel mounted; reading agent credentials').catch(() => undefined)
     void commands
       .farmGetAgentCredentials()
       .then((credentials) => {
@@ -67,9 +71,21 @@ export function FarmPanel() {
         // one every claim fails and the log fills with the same error for as
         // long as the machine is up.
         const shouldRun = credentials.unattended || loadAgentEnabled()
-        if (credentials.token && shouldRun && !isAgentRunning()) startAgent(stored)
+        if (credentials.token && shouldRun && !isAgentRunning()) {
+          startAgent(stored)
+        } else {
+          void commands
+            .farmLog(
+              `agent idle: token=${credentials.token ? 'yes' : 'no'} unattended=${credentials.unattended} enabled=${loadAgentEnabled()}`,
+            )
+            .catch(() => undefined)
+        }
       })
-      .catch(() => undefined)
+      .catch((error: unknown) => {
+        void commands
+          .farmLog(`could not read agent credentials: ${reason(error)}`)
+          .catch(() => undefined)
+      })
   }, [])
 
   const update = useCallback((changes: Partial<AgentSettings>) => {
@@ -160,26 +176,6 @@ export function FarmPanel() {
 
         {settings && (
           <div className='mt-4 grid gap-2.5'>
-            <Row label='Assembly line' hint='Translate and inpaint different pages at once'>
-              <Switch
-                checked={settings.assemblyLine}
-                onCheckedChange={(assemblyLine) => update({ assemblyLine })}
-              />
-            </Row>
-            <Row label='Local pages' hint='Pages on this GPU at once'>
-              <Counter
-                value={settings.localConcurrency}
-                min={1}
-                onChange={(localConcurrency) => update({ localConcurrency })}
-              />
-            </Row>
-            <Row label='Translating' hint='Pages on the LLM box at once'>
-              <Counter
-                value={settings.llmConcurrency}
-                min={1}
-                onChange={(llmConcurrency) => update({ llmConcurrency })}
-              />
-            </Row>
             <Row
               label='Recycle after'
               hint='Chapters before restarting; the GPU allocator never gives its peak back. 0 = never'

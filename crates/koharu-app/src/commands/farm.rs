@@ -125,6 +125,19 @@ impl IpcResponse for PageImage {
     }
 }
 
+/// Write one agent log line to the application log.
+///
+/// The agent runs in the webview, and the farm instance's window is hidden, so
+/// its own log is somewhere nobody can read. Without this an idle agent and a
+/// broken one look exactly alike from outside — which is how the first live
+/// run was spent guessing.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn farm_log(message: String) -> std::result::Result<(), Error> {
+    tracing::info!(target: "koharu_farm", "{message}");
+    Ok(())
+}
+
 /// Read one page by id, without selecting it.
 ///
 /// Upstream's `get_page` returns whichever page is active, which the agent

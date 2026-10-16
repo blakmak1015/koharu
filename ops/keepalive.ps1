@@ -18,7 +18,7 @@ $ErrorActionPreference = 'SilentlyContinue'
 $mutex = New-Object System.Threading.Mutex($false, 'Global\koharu-farm-keepalive')
 if (-not $mutex.WaitOne(0)) { return }
 
-$port       = 4100
+$port       = 4190
 $log        = "$env:USERPROFILE\koharu-keepalive.log"
 $restart    = Join-Path $PSScriptRoot 'restart-server.ps1'
 $projectDir = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Koharu'
