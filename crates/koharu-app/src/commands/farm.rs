@@ -22,12 +22,15 @@ use koharu_scene::EntityId;
 use koharu_secrets::{ExposeSecret as _, SecretString};
 use serde::{Deserialize, Serialize};
 use specta::Type;
-use std::path::PathBuf;
+
 use tauri::{State, ipc::IpcResponse};
 
 use super::{
-    Error, canvas::CanvasChannel, lifecycle::add_pages, processing::Processing,
-    project::CurrentProject,
+    Error,
+    canvas::CanvasChannel,
+    lifecycle::add_pages,
+    processing::Processing,
+    project::{CurrentProject, Page, Project},
 };
 
 /// Distinguishes the credentials of two instances sharing one machine account.
@@ -82,34 +85,84 @@ fn read_credentials() -> anyhow::Result<AgentCredentials> {
     Ok(AgentCredentials { token, agent_id })
 }
 
-/// Append pages to the open project from paths the caller already has, and
-/// return the new page ids in order.
+/// One source page to fetch, in reading order.
+#[derive(Debug, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SourcePage {
+    url: String,
+    /// Becomes the page label, so the project reads in the right order.
+    name: String,
+}
+
+/// Download the chapter's source pages and append them to the open project,
+/// returning the new page ids in order.
 ///
-/// The agent downloads raw pages to a scratch directory and passes the paths
-/// here. Missing paths are rejected up front: a silently short import would
-/// produce a chapter with pages missing, which is worse than a failed job.
+/// Rust fetches them rather than the webview handing bytes back over IPC: a
+/// typed command would carry them as a JSON array of numbers, which for a
+/// forty-page chapter is tens of megabytes of text to encode and parse. The
+/// bytes never need to be in the webview at all.
 #[tracing::instrument(
     target = "koharu_metrics",
     name = "import",
     skip_all,
-    fields(origin = "farm", method = "paths"),
+    fields(origin = "farm", method = "urls"),
 )]
 #[tauri::command]
 #[specta::specta]
 pub(crate) async fn farm_import_pages(
-    paths: Vec<PathBuf>,
+    pages: Vec<SourcePage>,
     desktop: State<'_, Desktop>,
     project: State<'_, CurrentProject>,
     processing: State<'_, Processing>,
     canvas_channel: State<'_, CanvasChannel>,
 ) -> std::result::Result<Vec<EntityId>, Error> {
-    if paths.is_empty() {
+    if pages.is_empty() {
         return Err(anyhow::anyhow!("no pages were given to import").into());
     }
-    if let Some(missing) = paths.iter().find(|path| !path.is_file()) {
-        return Err(anyhow::anyhow!("{} is not a readable file", missing.display()).into());
+    let directory = tempfile::tempdir().context("failed to create a scratch directory")?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(90))
+        .build()
+        .context("failed to build the download client")?;
+
+    let mut paths = Vec::with_capacity(pages.len());
+    for page in &pages {
+        let response = client
+            .get(&page.url)
+            .send()
+            .await
+            .with_context(|| format!("failed to download {}", page.name))?
+            .error_for_status()
+            .with_context(|| format!("failed to download {}", page.name))?;
+        let bytes = response
+            .bytes()
+            .await
+            .with_context(|| format!("failed to read {}", page.name))?;
+        // The name is the website's, so keep it to a file name.
+        let name = std::path::Path::new(&page.name)
+            .file_name()
+            .context("a source page has no file name")?;
+        let path = directory.path().join(name);
+        tokio::fs::write(&path, &bytes)
+            .await
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        paths.push(path);
     }
-    add_pages(paths, &desktop, &project, &processing, &canvas_channel).await
+
+    // The scratch files are decoded during the import, so the directory can go
+    // as soon as it returns — but not before.
+    let imported = add_pages(paths, &desktop, &project, &processing, &canvas_channel).await;
+    drop(directory);
+    let imported = imported?;
+    if imported.len() != pages.len() {
+        return Err(anyhow::anyhow!(
+            "imported {} page(s) for {} source page(s)",
+            imported.len(),
+            pages.len()
+        )
+        .into());
+    }
+    Ok(imported)
 }
 
 /// PNG bytes, returned over the raw IPC body rather than as a JSON number
@@ -123,6 +176,25 @@ impl IpcResponse for PageImage {
     fn body(self) -> tauri::Result<tauri::ipc::InvokeResponseBody> {
         Ok(self.0.into())
     }
+}
+
+/// Read one page by id, without selecting it.
+///
+/// Upstream's `get_page` returns whichever page is active, which the agent
+/// cannot use: it runs several pages at once, and selecting each one to read
+/// its text blocks would make them race over a single shared selection — and
+/// would move the editor's view around while a person is looking at it.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn farm_get_page(
+    page: EntityId,
+    project: State<'_, CurrentProject>,
+) -> std::result::Result<Page, Error> {
+    let snapshot = {
+        let project = project.project.lock().await;
+        project.as_ref().context("no project is open")?.snapshot()
+    };
+    Ok(Project::page(&snapshot, page)?)
 }
 
 /// Which image of a page the agent wants.

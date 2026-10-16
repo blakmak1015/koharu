@@ -77,14 +77,24 @@ export const commands = {
 	commitTransform: (expectedRevision: Revision, elements: TransformFrame[]) => __TAURI_INVOKE<number | null>("commit_transform", { expectedRevision, elements }).then((v) => (v==null?v:v as typeof v)),
 	commitInpaint: (expectedRevision: Revision, points: Point[], diameter: number) => __TAURI_INVOKE<string | null>("commit_inpaint", { expectedRevision, points: points.map(i=>i), diameter }),
 	/**
-	 *  Append pages to the open project from paths the caller already has, and
-	 *  return the new page ids in order.
+	 *  Download the chapter's source pages and append them to the open project,
+	 *  returning the new page ids in order.
 	 * 
-	 *  The agent downloads raw pages to a scratch directory and passes the paths
-	 *  here. Missing paths are rejected up front: a silently short import would
-	 *  produce a chapter with pages missing, which is worse than a failed job.
+	 *  Rust fetches them rather than the webview handing bytes back over IPC: a
+	 *  typed command would carry them as a JSON array of numbers, which for a
+	 *  forty-page chapter is tens of megabytes of text to encode and parse. The
+	 *  bytes never need to be in the webview at all.
 	 */
-	farmImportPages: (paths: string[]) => __TAURI_INVOKE<EntityId[]>("farm_import_pages", { paths }),
+	farmImportPages: (pages: SourcePage[]) => __TAURI_INVOKE<EntityId[]>("farm_import_pages", { pages }),
+	/**
+	 *  Read one page by id, without selecting it.
+	 * 
+	 *  Upstream's `get_page` returns whichever page is active, which the agent
+	 *  cannot use: it runs several pages at once, and selecting each one to read
+	 *  its text blocks would make them race over a single shared selection — and
+	 *  would move the editor's view around while a person is looking at it.
+	 */
+	farmGetPage: (page: EntityId) => __TAURI_INVOKE<Page>("farm_get_page", { page }).then((v) => (({...v,layers:v.layers.map(i=>i),regions:v.regions.map(i=>({...i,geometry:({...i.geometry,points:i.geometry.points.map(i=>i)})}))}) as typeof v)),
 	/**
 	 *  Render one page of the open project and return it as PNG bytes.
 	 * 
@@ -522,6 +532,13 @@ export type Scope = { scope: "project" } | { scope: "pages"; value: EntityId[] }
 	page: EntityId,
 	bounds: Bounds,
 } } | { scope: "entities"; value: EntityId[] };
+
+/**  One source page to fetch, in reading order. */
+export type SourcePage = {
+	url: string,
+	/**  Becomes the page label, so the project reads in the right order. */
+	name: string,
+};
 
 export type SourceText = {
 	text: string,
