@@ -20,6 +20,7 @@ import {
   completeJob,
   delay,
   failJob,
+  fetchDeadline,
   reason,
   sendHeartbeat,
   sourceUrl,
@@ -68,6 +69,9 @@ const ERROR_WAIT_MS = 30_000
 const HEARTBEAT_MS = 30_000
 // A stage can legitimately take minutes; this bounds silence, not work.
 const STALL_TIMEOUT_MS = 600_000
+// Two tries, far enough apart that a restarting LLM box has come back.
+const PIPELINE_ATTEMPTS = 2
+const RETRY_WAIT_MS = 60_000
 
 // --- state ------------------------------------------------------------------
 
@@ -273,21 +277,37 @@ async function translatePages(
   pageIds: EntityId[],
   pages: AgentPage[],
 ): Promise<CompletePage[]> {
-  log(`running the pipeline over ${pageIds.length} page(s)...`)
-  const jobId = await commands.process(
-    { scope: 'pages', value: pageIds },
-    { operation: 'full' },
-  )
-  let lastBeat = 0
-  await awaitJob(jobId, (done, total) => {
-    log(`pipeline ${done}/${total}`)
-    // The lease has to outlive the whole chapter, and the pipeline can spend
-    // minutes on one page.
-    if (Date.now() - lastBeat > HEARTBEAT_MS) {
-      lastBeat = Date.now()
-      void sendHeartbeat(job.id)
+  // Retried as a whole, which is cheap: every stage implements `skip`, so a
+  // second run leaves the pages it already detected, OCR'd and inpainted
+  // alone - and detection is the expensive one. Without this a single
+  // transient 502 from the shared LLM box throws away a whole chapter's GPU
+  // work, which is exactly what the first live run did.
+  for (let attempt = 1; ; attempt++) {
+    log(`running the pipeline over ${pageIds.length} page(s)...`)
+    try {
+      const jobId = await commands.process(
+        { scope: 'pages', value: pageIds },
+        { operation: 'full' },
+      )
+      let lastBeat = 0
+      await awaitJob(jobId, (done, total) => {
+        log(`pipeline ${done}/${total}`)
+        // The lease has to outlive the whole chapter, and the pipeline can
+        // spend minutes on one page.
+        if (Date.now() - lastBeat > HEARTBEAT_MS) {
+          lastBeat = Date.now()
+          void sendHeartbeat(job.id)
+        }
+      })
+      break
+    } catch (error) {
+      throwIfStopped()
+      if (attempt >= PIPELINE_ATTEMPTS) throw error
+      log(`pipeline failed: ${reason(error)} — retrying (${attempt}/${PIPELINE_ATTEMPTS})`)
+      await sendHeartbeat(job.id)
+      await delay(RETRY_WAIT_MS)
     }
-  })
+  }
 
   publish({ status: 'uploading' })
   const uploaded: CompletePage[] = []
@@ -303,8 +323,40 @@ async function translatePages(
 
 // --- loop ---------------------------------------------------------------------
 
+/**
+ * Is the translation provider answering?
+ *
+ * Checked before claiming, never after. The LLM box is shared and goes down
+ * on its own; an agent that claims a chapter it cannot translate marks it
+ * failed and immediately claims the next one, so a single outage churns the
+ * whole queue into failures. Idling costs nothing.
+ *
+ * The 0.59.2 agent had this as `ensureLlmLoaded`, which also chose a model.
+ * Choosing is the supervisor's job now - this only asks whether the pinned
+ * one can be reached.
+ */
+async function providerReachable(): Promise<boolean> {
+  try {
+    const { providers } = await commands.getPreferences()
+    const entry = providers.entries.find(
+      (candidate) => candidate.config.provider === 'openai-compatible',
+    )
+    const base =
+      entry?.config.provider === 'openai-compatible' ? entry.config.settings.base_url : null
+    if (!base) return true // Not this provider; nothing here to check.
+    const response = await fetchDeadline(`${base.replace(/\/$/, '')}/models`, {}, 15_000)
+    if (response.ok) return true
+    log(`translation provider is not answering (HTTP ${response.status})`)
+    return false
+  } catch (error) {
+    log(`translation provider is not answering: ${reason(error)}`)
+    return false
+  }
+}
+
 /** One pass. Returns true when a chapter was processed. */
 async function processOneJob(): Promise<boolean> {
+  if (!(await providerReachable())) return false
   publish({ status: 'polling' })
   const claim = await claimJob(log)
   if (!claim.claimed) {
