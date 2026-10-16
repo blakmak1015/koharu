@@ -179,6 +179,49 @@ function awaitJob(jobId: string, onProgress?: (done: number, total: number) => v
   })
 }
 
+// --- glossary -----------------------------------------------------------------
+
+/**
+ * The supervisor's pinned instructions, captured before the first chapter
+ * changes them.
+ *
+ * Read once, not per chapter: each chapter writes its own glossary into the
+ * same field, so reading it back later would compound one chapter's series
+ * terms into the next one's.
+ */
+let baseInstructions: string | null = null
+
+/**
+ * Put the chapter's resolved glossary where the pipeline will read it.
+ *
+ * The website resolves global, content-type and series scopes into one
+ * prompt and hands it over with the claim. `process` takes no instructions
+ * argument, so it goes through the configuration the translation stage reads
+ * - which is also where `ops/restart-server.ps1` pins the numerals rule, so
+ * the two are composed rather than one overwriting the other.
+ */
+async function applyGlossary(systemPrompt: string | null | undefined): Promise<void> {
+  const preferences = await commands.getPreferences()
+  if (baseInstructions === null) {
+    baseInstructions = preferences.pipeline.translation.instructions ?? ''
+  }
+  const glossary = systemPrompt?.trim() ?? ''
+  const instructions = [baseInstructions, glossary].filter(Boolean).join('\n\n')
+  await commands.savePreferences(
+    {
+      ...preferences.pipeline,
+      translation: { ...preferences.pipeline.translation, instructions: instructions || null },
+    },
+    preferences.providers,
+    preferences.typesetting,
+  )
+  log(
+    glossary
+      ? `applied the central glossary (${glossary.length} chars)`
+      : 'no glossary for this series',
+  )
+}
+
 // --- one chapter --------------------------------------------------------------
 
 async function uploadFinishedPage(
@@ -245,7 +288,7 @@ async function processClaim(claim: ClaimedJob): Promise<void> {
     )
 
     await sendHeartbeat(job.id)
-    if (claim.systemPrompt) log(`using central glossary (${claim.systemPrompt.length} chars)`)
+    await applyGlossary(claim.systemPrompt)
 
     const uploaded = await translatePages(job, pageIds, remaining)
     uploaded.sort((left, right) => left.pageNumber - right.pageNumber)
