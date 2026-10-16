@@ -4701,6 +4701,7 @@ dependencies = [
  "parking_lot",
  "rars",
  "rayon",
+ "reqwest",
  "rfd",
  "schemars 1.2.2",
  "serde",

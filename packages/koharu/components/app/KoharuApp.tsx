@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next'
 
 import { TitleBar } from '@/components/app/TitleBar'
 import { Editor } from '@/components/editor/Editor'
+import { FarmPanel } from '@/components/farm/FarmPanel'
 import { SettingsPage } from '@/components/preferences/SettingsPage'
 import { StartView } from '@/components/start/StartView'
 import { useProject } from '@/lib/queries'
@@ -36,6 +37,10 @@ export function KoharuApp() {
       )}
     >
       <TitleBar />
+      {/* Fork: the unattended agent's operator panel. Mounted unconditionally
+          so the farm instance, whose window starts hidden, resumes work after
+          a restart without anyone opening anything. */}
+      <FarmPanel />
       {settingsOpen ? (
         <SettingsPage />
       ) : project === undefined ? (
