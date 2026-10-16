@@ -21,7 +21,7 @@
         "minWidth": 900,
         "minHeight": 600,
         "center": true,
-        "title": "Koharu",
+        "title": "Manga-TH Translator",
         "decorations": false,
         "transparent": false,
         "visible": false
@@ -38,14 +38,14 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "createUpdaterArtifacts": true,
+    "createUpdaterArtifacts": false,
     "license": "MIT OR Apache-2.0",
     "resources": ["../../LICENSE-MIT", "../../LICENSE-APACHE"]
   },
   "plugins": {
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQ1QjAxQjRENzYxOTE1MDYKUldRR0ZSbDJUUnV3MWFXN09pNjhoRmNMSTV2Ylh3Wm9CZHhiRE01RVZtYXFLWVd4Vi9SbkE4QnUK",
-      "endpoints": ["https://github.com/koharu-rs/koharu/releases/latest/download/latest.json"],
+      "endpoints": [],
       "windows": {
         "installMode": "quiet"
       }
