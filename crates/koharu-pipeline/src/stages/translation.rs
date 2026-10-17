@@ -1,6 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use koharu_scene::{Authored, LanguageTag, Origin, SourceText, Translation};
+use koharu_scene::{Authored, EntityId, LanguageTag, Origin, SourceText, Translation};
 use koharu_translator::{TranslationRequest, Translator};
 
 use crate::TranslationConfig;
@@ -18,6 +18,82 @@ impl Processor {
     pub(super) fn new(config: TranslationConfig, translator: Translator) -> Self {
         Self { config, translator }
     }
+}
+
+/// Turns speaker attribution on for one series.
+///
+/// The pipeline knows about pages and projects, never about which manga it is
+/// working on, so the series-level decision has to arrive from the agent, which
+/// does know. It travels in the instructions because that is already the
+/// channel the agent writes per chapter, alongside the glossary. The marker is
+/// stripped before the model ever sees it.
+const SPEAKER_FLAG: &str = "[speaker-attribution: on]";
+
+/// What the model is asked when it is shown the page and the lines on it.
+///
+/// Kept in romaji and plain English on purpose: a prompt that spells out
+/// Japanese words teaches the model to echo them, which is how Japanese began
+/// leaking into Thai output once before.
+const SPEAKER_PROMPT: &str = "You are looking at one page of a Japanese manga, which reads right to left. Each numbered line below is the text of one speech bubble or caption on that page.
+
+For each line answer with who says it, in one of these forms:
+  male - two or three words describing them, or their name if the page gives one
+  female - the same
+  unknown
+
+Answer unknown whenever the page does not show it: narration, a sign, a bubble with nobody beside it, or a face you cannot read. Do not infer it from the wording, the topic or the tone - a wrong answer here is worse than no answer. Give exactly one answer per numbered line, in the same order, and nothing else.";
+
+impl Processor {
+    /// Ask the model who speaks each line, from the page itself.
+    ///
+    /// Same picture and same lines as the translation call, so the reply comes
+    /// back one answer per line without touching the response schema.
+    async fn attribute_speakers(
+        &self,
+        targets: &[(EntityId, String)],
+        image: std::sync::Arc<image::DynamicImage>,
+    ) -> Result<Vec<String>> {
+        let request = TranslationRequest::new(
+            targets.iter().map(|(_, source)| source.clone()),
+            self.config.target_language,
+        )
+        .with_instructions(SPEAKER_PROMPT)
+        .with_image(image);
+        let (_, answers) = self
+            .translator
+            .translate(&self.config.model, self.config.generation, request)
+            .await?;
+        Ok(answers)
+    }
+}
+
+/// Put the page's speakers under the standing instructions, if any were read.
+///
+/// Ranked below the speaker's own words deliberately: Japanese that says ore or
+/// atashi is evidence from the person talking, while a face beside a bubble is
+/// an interpretation, and the two disagree often enough to matter.
+fn compose_instructions(base: Option<&str>, speakers: &[String]) -> Option<String> {
+    let known = |answer: &String| {
+        let answer = answer.trim().to_ascii_lowercase();
+        !answer.is_empty() && !answer.starts_with("unknown")
+    };
+    if !speakers.iter().any(known) {
+        return base.map(|value| value.replace(SPEAKER_FLAG, "").trim().to_owned());
+    }
+    let mut out = String::new();
+    if let Some(base) = base {
+        out.push_str(base.replace(SPEAKER_FLAG, "").trim());
+        out.push_str("
+
+");
+    }
+    out.push_str("Who speaks each line on this page, read from the picture, in the same order as the lines you are given. A line naming a gender here is evidence of that speaker's gender - weaker than the speaker's own Japanese words, stronger than anything else. A line marked unknown is no evidence at all.
+");
+    for (index, speaker) in speakers.iter().enumerate() {
+        out.push_str(&format!("{}. {}
+", index + 1, speaker.trim()));
+    }
+    Some(out)
 }
 
 #[async_trait]
@@ -50,16 +126,47 @@ impl StageProcessor for Processor {
                 }
             }
         }
+        let page_image = if Translator::supports_vision(&self.config.model, &self.config.generation)
+        {
+            input.images.get(&input.scene, input.page, "source").await?
+        } else {
+            None
+        };
+
+        // Who says each line, read off the page before anything is translated.
+        //
+        // The model is handed the same picture and the same lines, and answers
+        // once per line, which is the shape this request already returns. It is
+        // a separate call on purpose: folding the question into the translation
+        // would mean changing the reply's schema, and the last time that prompt
+        // was altered the model started echoing Japanese into the output.
+        //
+        // Nothing here can fail a page. Attribution missing means the particle
+        // rule falls back to its default of writing none, which is the correct
+        // answer when nobody knows who is speaking.
+        let enabled = self
+            .config
+            .instructions
+            .as_deref()
+            .is_some_and(|value| value.contains(SPEAKER_FLAG));
+        let speakers = match (&page_image, enabled) {
+            (Some(image), true) => {
+                self.attribute_speakers(&targets, image.clone())
+                    .await
+                    .unwrap_or_default()
+            }
+            _ => Vec::new(),
+        };
+
+        let instructions = compose_instructions(self.config.instructions.as_deref(), &speakers);
         let mut request = TranslationRequest::new(
             targets.iter().map(|(_, source)| source.clone()),
             self.config.target_language,
         );
-        if let Some(instructions) = self.config.instructions.as_deref() {
+        if let Some(instructions) = instructions.as_deref() {
             request = request.with_instructions(instructions);
         }
-        if Translator::supports_vision(&self.config.model, &self.config.generation)
-            && let Some(image) = input.images.get(&input.scene, input.page, "source").await?
-        {
+        if let Some(image) = page_image {
             request = request.with_image(image);
         }
         let (provider, translated) = self
