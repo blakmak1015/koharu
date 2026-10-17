@@ -39,6 +39,40 @@ function Running() {
   return [bool](Get-Process koharu -ErrorAction SilentlyContinue)
 }
 
+# The farm's own log is the only honest liveness signal. On 2026-10-17 a wgpu
+# out-of-memory panic killed the agent thread while the process stayed up and
+# /health still answered {ok:true,ready:true}: the farm sat dead for three and
+# a half hours with 59 chapters queued, and the checks above would not have
+# noticed. The agent writes a line every pass - 15s between idle polls, 60s
+# between retries, and one per pipeline step while it works - so a log that has
+# not moved in ten minutes means the loop is gone, not that there is no work.
+$farmLog      = Join-Path $env:LOCALAPPDATA 'Koharu\logs\koharu.log'
+$StallMinutes = 10
+
+function Stalled() {
+  try {
+    $written = (Get-Item $farmLog -ErrorAction Stop).LastWriteTime
+    return (((Get-Date) - $written).TotalMinutes -ge $StallMinutes)
+  } catch {
+    # No log file at all: a fresh install, or a path that moved. Silence is not
+    # evidence of death, so leave this one to the health check.
+    return $false
+  }
+}
+
+# A just-launched instance has not written anything yet, and restarting it for
+# that would loop for ever.
+function JustStarted() {
+  try {
+    $started = (Get-Process koharu -ErrorAction Stop |
+      Sort-Object StartTime | Select-Object -First 1).StartTime
+    if (-not $started) { return $true }
+    return (((Get-Date) - $started).TotalMinutes -lt $StallMinutes)
+  } catch {
+    return $false
+  }
+}
+
 # Ready, not merely listening: the socket opens before the pipeline has read
 # its configuration, and work dispatched in that window races it.
 function Healthy() {
@@ -110,6 +144,11 @@ while ($true) {
     } else {
       Start-Sleep -Seconds 60
     }
+  }
+  elseif ((Stalled) -and -not (JustStarted)) {
+    Relaunch "no farm log line for $StallMinutes minutes (process up, health ok)"
+    $unhealthy = 0
+    Start-Sleep -Seconds 150
   }
   else {
     $unhealthy = 0
