@@ -30,7 +30,7 @@ use super::{
     canvas::CanvasChannel,
     lifecycle::add_pages,
     processing::Processing,
-    project::CurrentProject,
+    project::{CurrentProject, ProjectLibrary},
 };
 
 /// One source page to fetch, in reading order.
@@ -246,6 +246,75 @@ pub(crate) async fn farm_page_blocks(
         height: value.height,
         blocks,
     })
+}
+
+/// Archive the open project and PUT it to a presigned URL.
+///
+/// The farm lost this in the move to 0.83: nothing saves a `.khrproj` master
+/// any more, so a chapter translated since the port can never be reopened or
+/// re-exported. That is exactly what was missing on 2026-10-17, when a bad
+/// export could only be undone by translating 23 published chapters again.
+///
+/// Rust does the whole round trip because the archive runs to tens of
+/// megabytes: handing those bytes to the webview and straight back would copy
+/// them through IPC twice for nothing. The caller supplies the URL, so the
+/// agent still decides what gets uploaded where.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn farm_upload_project(
+    url: String,
+    project: State<'_, CurrentProject>,
+    library: State<'_, ProjectLibrary>,
+) -> std::result::Result<f64, Error> {
+    let name = {
+        let project = project.project.lock().await;
+        project.as_ref().context("no project is open")?.name.clone()
+    };
+    let path = library.project_path(&name)?;
+    let archive = tokio_rayon::spawn(move || archive_project(&path)).await?;
+    let size = archive.len() as f64;
+    let response = reqwest::Client::new()
+        .put(url)
+        .header(reqwest::header::CONTENT_TYPE, "application/zip")
+        .body(archive)
+        .send()
+        .await?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(anyhow::anyhow!("master upload failed: HTTP {status}").into());
+    }
+    Ok(size)
+}
+
+/// Zip a `.khrproj` directory: `state-a.khr`, `state-b.khr` and `blobs/`.
+///
+/// The lock file belongs to the running process, not to the project. Blobs are
+/// already webp/png, so deflating them again spends time to save nothing.
+fn archive_project(path: &std::path::Path) -> anyhow::Result<Vec<u8>> {
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for entry in walkdir::WalkDir::new(path).into_iter().filter_map(Result::ok) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let name = entry
+            .path()
+            .strip_prefix(path)?
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/");
+        if name == "project.lock" {
+            continue;
+        }
+        let options = zip::write::SimpleFileOptions::default().compression_method(
+            if name.starts_with("blobs/") {
+                zip::CompressionMethod::Stored
+            } else {
+                zip::CompressionMethod::Deflated
+            },
+        );
+        writer.start_file(&name, options)?;
+        std::io::copy(&mut std::fs::File::open(entry.path())?, &mut writer)?;
+    }
+    Ok(writer.finish()?.into_inner())
 }
 
 /// Which image of a page the agent wants.

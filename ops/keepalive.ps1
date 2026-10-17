@@ -121,12 +121,22 @@ function CleanProjects() {
   }
 }
 
+# A rebuild deliberately takes koharu down, and the watchdog restarting it in
+# that window relaunches the OLD binary and locks the file the linker is about
+# to write. ops/build.ps1 drops this marker for the duration; nothing else does.
+$pauseMarker = Join-Path $PSScriptRoot '.keepalive-pause'
+
 Note "keepalive started (pid $PID); projects=$projectDir"
 if (-not (Test-Path $restart)) { Note "restart-server.ps1 not found next to this script"; return }
 
 $unhealthy = 0
 $lastClean = Get-Date
 while ($true) {
+  if (Test-Path $pauseMarker) {
+    Note 'paused by ops/build.ps1'
+    Start-Sleep -Seconds 30
+    continue
+  }
   if (-not (Running)) {
     Relaunch 'process absent'
     $unhealthy = 0

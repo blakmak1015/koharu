@@ -18,6 +18,7 @@ import { pageTextBlocks, renderBrandedPage, type WatermarkCorner } from './page'
 import {
   claimJob,
   completeJob,
+  presignMaster,
   delay,
   failJob,
   reason,
@@ -351,8 +352,14 @@ async function processClaim(claim: ClaimedJob): Promise<void> {
 
     publish({ status: 'uploading' })
     reportHedges(uploaded)
+    // Keep the project itself, not just what was published from it. Without a
+    // master a chapter can never be reopened or re-exported, which on
+    // 2026-10-17 turned a bad export into 23 chapters that had to be translated
+    // again. Never fails the chapter: a master is a convenience, the pages are
+    // the work.
+    const masterKey = await uploadMaster(job.chapterId, log)
     log('completing job...')
-    await completeJob(job.id, uploaded, log)
+    await completeJob(job.id, uploaded, log, masterKey ?? undefined)
     log(`job ${job.id} completed`)
     publish({ currentJob: null, processedCount: state.processedCount + 1 })
   } finally {
@@ -450,6 +457,23 @@ async function providerReachable(): Promise<boolean> {
   } catch (error) {
     log(`could not reach the translation provider: ${reason(error)}`)
     return false
+  }
+}
+
+/** Archive the open project to R2 and return its key, or null. */
+async function uploadMaster(
+  chapterId: string,
+  log: (message: string) => void,
+): Promise<string | null> {
+  const presigned = await presignMaster(chapterId, log)
+  if (!presigned) return null
+  try {
+    const bytes = await commands.farmUploadProject(presigned.url)
+    log(`master archived (${Math.round(Number(bytes) / 1_048_576)} MB)`)
+    return presigned.key
+  } catch (error) {
+    log(`master upload failed: ${reason(error)}`)
+    return null
   }
 }
 

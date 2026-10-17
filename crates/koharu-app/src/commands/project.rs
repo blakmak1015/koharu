@@ -236,6 +236,12 @@ impl ProjectLibrary {
         Project::open(name, path).await
     }
 
+    /// The project's directory on disk, for callers that need the files
+    /// themselves rather than a session over them.
+    pub(crate) fn project_path(&self, name: &str) -> Result<PathBuf> {
+        Ok(self.resolve(name)?.1)
+    }
+
     pub(crate) fn delete(&self, name: &str) -> Result<()> {
         let (_, path) = self.resolve(name)?;
         if !path.is_dir() {

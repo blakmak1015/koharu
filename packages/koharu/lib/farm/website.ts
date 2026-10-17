@@ -204,13 +204,53 @@ export async function uploadPage(
   return body.uploaded.url
 }
 
-export async function completeJob(jobId: string, pages: CompletePage[], log?: Logger): Promise<void> {
+/**
+ * A short-lived presigned R2 URL for this chapter's `.khrproj` master.
+ *
+ * The key is derived server-side from the chapter, so the agent can only ever
+ * write its own archive. Returns null rather than throwing: a master is a
+ * convenience, and a chapter that translated fine must still publish.
+ */
+export async function presignMaster(
+  chapterId: string,
+  log?: Logger,
+): Promise<{ url: string; key: string } | null> {
+  try {
+    const response = await agentFetch(
+      '/api/admin/translation/khrproj/presign',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ chapterId, op: 'put', kind: 'master' }),
+      },
+      30_000,
+      1,
+      log,
+    )
+    if (!response.ok) {
+      log?.(`master presign failed: HTTP ${response.status}`)
+      return null
+    }
+    const body = (await response.json()) as { url?: string; key?: string }
+    return body.url && body.key ? { url: body.url, key: body.key } : null
+  } catch (error) {
+    log?.(`master presign failed: ${reason(error)}`)
+    return null
+  }
+}
+
+export async function completeJob(
+  jobId: string,
+  pages: CompletePage[],
+  log?: Logger,
+  masterKhrprojKey?: string,
+): Promise<void> {
   const response = await agentFetch(
     '/api/admin/translation/agent/complete',
     {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ jobId, pages }),
+      body: JSON.stringify({ jobId, pages, ...(masterKhrprojKey ? { masterKhrprojKey } : {}) }),
     },
     180_000,
     1,

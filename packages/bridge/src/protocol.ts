@@ -103,11 +103,18 @@ export const commands = {
 	 *  it would make them race over a single shared selection and move the
 	 *  editor's view while someone is looking at it.
 	 * 
-	 *  And its `Layer::Text` view reports only a Geometry component sitting on the
-	 *  layer itself, which nothing the pipeline builds ever has: detection creates
-	 *  the layer and relates it to the region it was recognised from, and the
-	 *  position lives there. Resolving that is what `TextLayerRef::frame` is for,
-	 *  so this asks the scene instead of reassembling the answer in TypeScript.
+	 *  And its `Layer::Text` view reports only the scene's authored components,
+	 *  which is not what ends up on the page. The scene answers with the source
+	 *  bubble: the whole balloon even where two speech layers share one, the
+	 *  Japanese original's vertical writing mode, and no font size at all, because
+	 *  the pipeline leaves `Typography::size` unset and lets the renderer auto-fit.
+	 *  Publishing that produced an HTML overlay with Thai set sideways, oversized,
+	 *  and stacked on itself.
+	 * 
+	 *  So this asks the renderer for the same frame it is about to rasterise and
+	 *  reads the placement it resolved: one cell per text layer, the writing mode
+	 *  it chose for the TRANSLATION (horizontal, since Thai is not CJK), and the
+	 *  font size it actually fitted. The overlay then matches the baked page.
 	 */
 	farmPageBlocks: (page: EntityId) => __TAURI_INVOKE<FarmPage>("farm_page_blocks", { page }).then((v) => (({...v,blocks:v.blocks.map(i=>({...i,fontSize:i.fontSize==null?i.fontSize:i.fontSize}))}) as typeof v)),
 	/**
@@ -119,6 +126,20 @@ export const commands = {
 	 *  watermark is baked there before upload.
 	 */
 	farmRenderPage: (page: EntityId, variant: PageVariant) => __TAURI_INVOKE<PageImage>("farm_render_page", { page, variant }),
+	/**
+	 *  Archive the open project and PUT it to a presigned URL.
+	 * 
+	 *  The farm lost this in the move to 0.83: nothing saves a `.khrproj` master
+	 *  any more, so a chapter translated since the port can never be reopened or
+	 *  re-exported. That is exactly what was missing on 2026-10-17, when a bad
+	 *  export could only be undone by translating 23 published chapters again.
+	 * 
+	 *  Rust does the whole round trip because the archive runs to tens of
+	 *  megabytes: handing those bytes to the webview and straight back would copy
+	 *  them through IPC twice for nothing. The caller supplies the URL, so the
+	 *  agent still decides what gets uploaded where.
+	 */
+	farmUploadProject: (url: string) => __TAURI_INVOKE<number>("farm_upload_project", { url }),
 	/**  Read this instance's agent credentials. */
 	farmGetAgentCredentials: () => __TAURI_INVOKE<AgentCredentials>("farm_get_agent_credentials"),
 	/**
