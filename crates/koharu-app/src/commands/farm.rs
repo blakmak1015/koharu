@@ -18,7 +18,8 @@ use image::{
 };
 use koharu_desktop::Desktop;
 use koharu_rasterizer::RasterOptions;
-use koharu_scene::{EntityId, TextLayout as SceneTextLayout, Visibility};
+use koharu_renderer::{LayerKind, WritingMode};
+use koharu_scene::EntityId;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
@@ -171,79 +172,72 @@ pub(crate) struct FarmPage {
 /// it would make them race over a single shared selection and move the
 /// editor's view while someone is looking at it.
 ///
-/// And its `Layer::Text` view reports only a Geometry component sitting on the
-/// layer itself, which nothing the pipeline builds ever has: detection creates
-/// the layer and relates it to the region it was recognised from, and the
-/// position lives there. Resolving that is what `TextLayerRef::frame` is for,
-/// so this asks the scene instead of reassembling the answer in TypeScript.
+/// And its `Layer::Text` view reports only the scene's authored components,
+/// which is not what ends up on the page. The scene answers with the source
+/// bubble: the whole balloon even where two speech layers share one, the
+/// Japanese original's vertical writing mode, and no font size at all, because
+/// the pipeline leaves `Typography::size` unset and lets the renderer auto-fit.
+/// Publishing that produced an HTML overlay with Thai set sideways, oversized,
+/// and stacked on itself.
+///
+/// So this asks the renderer for the same frame it is about to rasterise and
+/// reads the placement it resolved: one cell per text layer, the writing mode
+/// it chose for the TRANSLATION (horizontal, since Thai is not CJK), and the
+/// font size it actually fitted. The overlay then matches the baked page.
 #[tauri::command]
 #[specta::specta]
 pub(crate) async fn farm_page_blocks(
     page: EntityId,
     project: State<'_, CurrentProject>,
+    desktop: State<'_, Desktop>,
 ) -> std::result::Result<FarmPage, Error> {
     let snapshot = {
         let project = project.project.lock().await;
         project.as_ref().context("no project is open")?.snapshot()
     };
     let value = snapshot.page(page)?.page()?;
+    // The same frame `farm_render_page` burns in; the renderer caches it by
+    // revision, so asking here costs layout once for both.
+    let frame = desktop.renderer().render(&snapshot, page).await?;
     let mut blocks = Vec::new();
 
-    for entity in snapshot.descendants(page)? {
-        let id = entity.id();
-        if snapshot.component::<SceneTextLayout>(id)?.is_none() {
-            continue;
-        }
-        if snapshot
-            .component::<Visibility>(id)?
-            .is_some_and(|visibility| !visibility.visible)
-        {
-            continue;
-        }
-        let layer = snapshot.text_layer(id)?;
-        let content = layer.content()?;
-        let Some(translation) = content.translation()? else {
+    for layer in frame.layers() {
+        let LayerKind::Text(text) = layer.kind() else {
             continue;
         };
-        let text = translation.text.value.trim().to_owned();
-        if text.is_empty() {
+        if !layer.presentation().visible {
             continue;
         }
-        // The authored frame, else the balloon or fitted region behind it,
-        // else the region the text was recognised from.
-        let geometry = match layer.frame()? {
-            Some(geometry) => Some(geometry),
-            None => content
-                .source_region()?
-                .map(koharu_scene::AnalysisRegionRef::geometry)
-                .transpose()?,
-        };
-        let Some(geometry) = geometry else { continue };
-        let (x, y, width, height) = bounds(&geometry);
-        if width <= 0.0 || height <= 0.0 {
+        let value = text.text.trim().to_owned();
+        if value.is_empty() {
             continue;
         }
-        let typography = layer.typography()?;
+        let bounds = text.layout_bounds;
+        if !(bounds.width > 0.0 && bounds.height > 0.0) {
+            continue;
+        }
+        // The box the renderer laid the text out in, not the ink around the
+        // glyphs: the reader sets the same string in a different font, so a box
+        // measured around koharu's glyphs would clip it. Both centre the text in
+        // the box, so it lands in the same place.
         blocks.push(FarmBlock {
-            text,
-            source_text: content
-                .source()?
+            text: value,
+            source_text: snapshot
+                .text_layer(layer.entity())
+                .and_then(|layer| layer.content())
+                .and_then(|content| content.source())
+                .ok()
+                .flatten()
                 .map(|source| source.text.value.trim().to_owned())
                 .filter(|source| !source.is_empty()),
-            x,
-            y,
-            width,
-            height,
-            angle_degrees: snapshot
-                .component::<SceneTextLayout>(id)?
-                .and_then(|layout| layout.angle_degrees)
-                .unwrap_or(0.0_f32),
-            font_size: typography.as_ref().and_then(|value| value.size),
-            color: typography.as_ref().and_then(|value| value.color),
-            vertical: typography
-                .as_ref()
-                .and_then(|value| value.writing_mode)
-                .is_some_and(|mode| matches!(mode, koharu_scene::WritingMode::Vertical)),
+            x: f64::from(bounds.x),
+            y: f64::from(bounds.y),
+            width: f64::from(bounds.width),
+            height: f64::from(bounds.height),
+            angle_degrees: text.angle_degrees,
+            font_size: Some(text.font_size).filter(|size| *size > 0.0),
+            color: Some(text.color),
+            vertical: matches!(text.writing_mode, WritingMode::VerticalRl),
         });
     }
 
@@ -252,19 +246,6 @@ pub(crate) async fn farm_page_blocks(
         height: value.height,
         blocks,
     })
-}
-
-fn bounds(geometry: &koharu_scene::Geometry) -> (f64, f64, f64, f64) {
-    let xs = geometry.points.iter().map(|point| point.x);
-    let ys = geometry.points.iter().map(|point| point.y);
-    let left = xs.clone().fold(f64::INFINITY, f64::min);
-    let top = ys.clone().fold(f64::INFINITY, f64::min);
-    let right = xs.fold(f64::NEG_INFINITY, f64::max);
-    let bottom = ys.fold(f64::NEG_INFINITY, f64::max);
-    if !left.is_finite() || !top.is_finite() {
-        return (0.0, 0.0, 0.0, 0.0);
-    }
-    (left, top, right - left, bottom - top)
 }
 
 /// Which image of a page the agent wants.
