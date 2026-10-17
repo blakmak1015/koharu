@@ -840,7 +840,10 @@ impl Traversal<'_> {
                 .and_then(|value| value.font_style)
                 .map(Into::into),
             font_size: typography.as_ref().and_then(|value| value.size),
-            minimum_font_size: MINIMUM_FONT_SIZE,
+            // A floor that scales with the page. The flat 9px was 0.9% of the
+            // width on the ~1000px pages this pipeline handles - below what
+            // anyone can read, which is exactly how it was reported.
+            minimum_font_size: MINIMUM_FONT_SIZE.max(self.width as f32 * 0.014),
             page_width: self.width as f32,
             auto_fit: typography.as_ref().is_none_or(|value| value.auto_fit),
             alignment,

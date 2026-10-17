@@ -84,7 +84,7 @@ impl StageProcessor for Processor {
             let text = if source.trim() == "\u{2026}" {
                 "\u{2026}".to_owned()
             } else {
-                text
+                collapse_ellipsis(&text)
             };
             edit.set(
                 entity,
@@ -96,4 +96,48 @@ impl StageProcessor for Processor {
         }
         finish(edit)
     }
+}
+
+/// Collapse a run of ellipsis dots to three.
+///
+/// Japanese sets several ellipsis characters in a row for pacing and the model
+/// carries the run into Thai, where it reads as a stutter rather than a pause.
+/// Asking for this in the prompt worked only sometimes - the first chapter
+/// translated after the rule went live still had five blocks carrying six and
+/// nine dots - and a transform this mechanical has no sometimes.
+///
+/// Dots only. "!!" and "!?" are emphasis the source means and are left exactly
+/// as they came. A run already worth three dots or fewer is untouched, so a
+/// lone ellipsis character stays itself.
+fn collapse_ellipsis(text: &str) -> String {
+    let weight = |c: char| match c {
+        '.' => 1,
+        '\u{2026}' => 3,
+        _ => 0,
+    };
+    let mut out = String::with_capacity(text.len());
+    let mut run = String::new();
+    let mut dots = 0;
+    for character in text.chars() {
+        let value = weight(character);
+        if value > 0 {
+            run.push(character);
+            dots += value;
+            continue;
+        }
+        if dots > 3 {
+            out.push_str("...");
+        } else {
+            out.push_str(&run);
+        }
+        run.clear();
+        dots = 0;
+        out.push(character);
+    }
+    if dots > 3 {
+        out.push_str("...");
+    } else {
+        out.push_str(&run);
+    }
+    out
 }

@@ -347,7 +347,7 @@ fn automatic_maximum(
 /// deliberately short of what the old flat cap implies at full size: these are
 /// captions and background lines, and some of them are small because the artist
 /// drew them small.
-const OUTSIDE_BALLOON_FRACTION: f32 = 0.022;
+const OUTSIDE_BALLOON_FRACTION: f32 = 0.035;
 
 fn is_chinese_or_japanese_language(language: &str) -> bool {
     language
