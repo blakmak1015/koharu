@@ -22,6 +22,48 @@ impl Processor {
     }
 }
 
+/// Keep what the model read off the page, one entry per bubble it could name.
+///
+/// Reads the existing typography and changes one key. Writing a fresh one would
+/// set `auto_fit` to false and silently stop every one of these bubbles being
+/// fitted to its balloon - the field defaults the wrong way for this purpose.
+fn record_speakers(
+    input: &StageInput,
+    edit: &mut koharu_scene::Edit,
+    layers: &[EntityId],
+    speakers: &[String],
+) -> Result<()> {
+    for (layer, speaker) in layers.iter().zip(speakers) {
+        let speaker = speaker.trim();
+        if speaker.is_empty() || speaker.to_ascii_lowercase().starts_with("unknown") {
+            continue;
+        }
+        edit.observe::<koharu_scene::Typography>(*layer)?;
+        let mut typography = input
+            .scene
+            .component::<koharu_scene::Typography>(*layer)?
+            .unwrap_or(koharu_scene::Typography {
+                origin: Origin::Generated(generation(PRODUCER, "speaker")?),
+                preferred_font: None,
+                font_weight: None,
+                font_style: None,
+                size: None,
+                auto_fit: true,
+                color: None,
+                stroke_color: None,
+                stroke_width: None,
+                alignment: None,
+                writing_mode: None,
+                extensions: Default::default(),
+            });
+        typography
+            .extensions
+            .insert(crate::SPEAKER_KEY.to_owned(), speaker.to_owned());
+        edit.set(*layer, &typography)?;
+    }
+    Ok(())
+}
+
 /// Every panel on the page, as bounding boxes in reading order.
 ///
 /// Returned empty when the detector found none, which is the signal to fall
@@ -96,7 +138,7 @@ fn bounds_of(geometry: &koharu_scene::Geometry) -> Option<Bounds> {
 /// it. Bubbles outside every panel, and pages where no panel was detected, fall
 /// back to the banding on its own.
 fn sort_into_reading_order(
-    placed: &mut [(EntityId, String, Option<(f64, f64)>)],
+    placed: &mut [(EntityId, EntityId, String, Option<(f64, f64)>)],
     panels: &[Bounds],
     page_height: f64,
 ) {
@@ -105,12 +147,12 @@ fn sort_into_reading_order(
         corner.and_then(|(x, y)| panels.iter().position(|panel| panel.contains(x, y)))
     };
     placed.sort_by(|left, right| {
-        let (left_panel, right_panel) = (panel_of(left.2), panel_of(right.2));
+        let (left_panel, right_panel) = (panel_of(left.3), panel_of(right.3));
         match (left_panel, right_panel) {
             (Some(a), Some(b)) if a != b => return a.cmp(&b),
             _ => {}
         }
-        match (left.2, right.2) {
+        match (left.3, right.3) {
             (Some((left_x, left_y)), Some((right_x, right_y))) => {
                 if (left_y - right_y).abs() <= band {
                     // same row: the rightmost bubble is read first
@@ -239,14 +281,15 @@ impl StageProcessor for Processor {
                         ys.fold(f64::INFINITY, f64::min),
                     )
                 });
-                placed.push((content.id(), source.text.value, corner));
+                placed.push((content.id(), layer.id(), source.text.value, corner));
             }
         }
         let panels = page_panels(&input)?;
         sort_into_reading_order(&mut placed, &panels, page_size.height);
+        let layers: Vec<EntityId> = placed.iter().map(|(_, layer, _, _)| *layer).collect();
         let targets: Vec<(EntityId, String)> = placed
             .into_iter()
-            .map(|(entity, source, _)| (entity, source))
+            .map(|(entity, _, source, _)| (entity, source))
             .collect();
         let page_image = if Translator::supports_vision(&self.config.model, &self.config.generation)
         {
@@ -302,6 +345,7 @@ impl StageProcessor for Processor {
             edit.observe::<SourceText>(*entity)?;
             edit.observe::<Translation>(*entity)?;
         }
+        record_speakers(&input, &mut edit, &layers, &speakers)?;
         for ((entity, source), text) in targets.into_iter().zip(translated) {
             if input
                 .scene

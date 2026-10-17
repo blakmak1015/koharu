@@ -140,6 +140,14 @@ export const commands = {
 	 *  agent still decides what gets uploaded where.
 	 */
 	farmUploadProject: (url: string) => __TAURI_INVOKE<number>("farm_upload_project", { url }),
+	/**
+	 *  PUT a small document to a presigned URL.
+	 * 
+	 *  Goes through Rust for the same reason the archive does, but the reason here
+	 *  is CORS rather than size: a presigned R2 PUT issued from the webview needs
+	 *  the bucket to allow that origin, and the bucket is private on purpose.
+	 */
+	farmPutDocument: (url: string, body: string, contentType: string) => __TAURI_INVOKE<number>("farm_put_document", { url, body, contentType }),
 	/**  Read this instance's agent credentials. */
 	farmGetAgentCredentials: () => __TAURI_INVOKE<AgentCredentials>("farm_get_agent_credentials"),
 	/**
@@ -293,6 +301,8 @@ export type FarmBlock = {
 	fontSize: number | null,
 	color: [number, number, number, number] | null,
 	vertical: boolean,
+	/**  Who the translator read as saying this, when it could tell. */
+	speaker: string | null,
 };
 
 export type FarmPage = {

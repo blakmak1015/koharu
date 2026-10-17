@@ -66,6 +66,7 @@ export async function pageTextBlocks(
     color: toHex(block.color),
     strokeColor: contrastingStroke(block.color),
     direction: block.vertical ? ('vertical' as const) : ('horizontal' as const),
+    ...(block.speaker ? { speaker: block.speaker } : {}),
   }))
   if (textBlocks.length === 0) log?.(`page ${pageId}: the scene has no translated blocks`)
   return { textBlocks, width, height }

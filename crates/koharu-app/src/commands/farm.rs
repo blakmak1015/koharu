@@ -155,6 +155,8 @@ pub(crate) struct FarmBlock {
     font_size: Option<f32>,
     color: Option<[u8; 4]>,
     vertical: bool,
+    /// Who the translator read as saying this, when it could tell.
+    speaker: Option<String>,
 }
 
 #[derive(Debug, Serialize, Type)]
@@ -238,6 +240,16 @@ pub(crate) async fn farm_page_blocks(
             font_size: Some(text.font_size).filter(|size| *size > 0.0),
             color: Some(text.color),
             vertical: matches!(text.writing_mode, WritingMode::VerticalRl),
+            speaker: snapshot
+                .component::<koharu_scene::Typography>(layer.entity())
+                .ok()
+                .flatten()
+                .and_then(|typography| {
+                    typography
+                        .extensions
+                        .get(koharu_pipeline::SPEAKER_KEY)
+                        .cloned()
+                }),
         });
     }
 
@@ -246,6 +258,32 @@ pub(crate) async fn farm_page_blocks(
         height: value.height,
         blocks,
     })
+}
+
+/// PUT a small document to a presigned URL.
+///
+/// Goes through Rust for the same reason the archive does, but the reason here
+/// is CORS rather than size: a presigned R2 PUT issued from the webview needs
+/// the bucket to allow that origin, and the bucket is private on purpose.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn farm_put_document(
+    url: String,
+    body: String,
+    content_type: String,
+) -> std::result::Result<f64, Error> {
+    let size = body.len() as f64;
+    let response = reqwest::Client::new()
+        .put(url)
+        .header(reqwest::header::CONTENT_TYPE, content_type)
+        .body(body)
+        .send()
+        .await?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(anyhow::anyhow!("document upload failed: HTTP {status}").into());
+    }
+    Ok(size)
 }
 
 /// Archive the open project and PUT it to a presigned URL.

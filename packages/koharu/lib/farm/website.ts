@@ -53,6 +53,8 @@ export type TextBlock = {
   color?: string
   strokeColor?: string
   direction?: 'horizontal' | 'vertical'
+  /** Who the translator read as saying this, when it could tell. */
+  speaker?: string
 }
 
 export type CompletePage = {
@@ -214,6 +216,7 @@ export async function uploadPage(
 export async function presignMaster(
   chapterId: string,
   log?: Logger,
+  kind: 'master' | 'speakers' = 'master',
 ): Promise<{ url: string; key: string } | null> {
   try {
     const response = await agentFetch(
@@ -221,20 +224,20 @@ export async function presignMaster(
       {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ chapterId, op: 'put', kind: 'master' }),
+        body: JSON.stringify({ chapterId, op: 'put', kind }),
       },
       30_000,
       1,
       log,
     )
     if (!response.ok) {
-      log?.(`master presign failed: HTTP ${response.status}`)
+      log?.(`${kind} presign failed: HTTP ${response.status}`)
       return null
     }
     const body = (await response.json()) as { url?: string; key?: string }
     return body.url && body.key ? { url: body.url, key: body.key } : null
   } catch (error) {
-    log?.(`master presign failed: ${reason(error)}`)
+    log?.(`${kind} presign failed: ${reason(error)}`)
     return null
   }
 }

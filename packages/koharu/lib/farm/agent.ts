@@ -358,6 +358,7 @@ async function processClaim(claim: ClaimedJob): Promise<void> {
     // again. Never fails the chapter: a master is a convenience, the pages are
     // the work.
     const masterKey = await uploadMaster(job.chapterId, log)
+    await uploadSpeakers(job.chapterId, uploaded, log)
     log('completing job...')
     await completeJob(job.id, uploaded, log, masterKey ?? undefined)
     log(`job ${job.id} completed`)
@@ -457,6 +458,45 @@ async function providerReachable(): Promise<boolean> {
   } catch (error) {
     log(`could not reach the translation provider: ${reason(error)}`)
     return false
+  }
+}
+
+/**
+ * Keep what the translator read off each page: who it saw saying each line.
+ *
+ * Stored per chapter in R2 rather than with the chapter's pages, because the
+ * reader loads those on every view and D1 bills by the row, while this is read
+ * only when the character sheet is recomputed or somebody audits it.
+ *
+ * Lines nobody could be named for are left out; they are the normal case, and
+ * what matters later is how often a character WAS recognised.
+ */
+async function uploadSpeakers(
+  chapterId: string,
+  pages: CompletePage[],
+  log: (message: string) => void,
+): Promise<void> {
+  const named = pages
+    .map((page) => ({
+      p: page.pageNumber,
+      lines: (page.textBlocks ?? [])
+        .filter((block) => block.speaker)
+        .map((block) => ({ who: block.speaker, th: block.text, jp: block.sourceText ?? '' })),
+    }))
+    .filter((page) => page.lines.length)
+  const lines = named.reduce((total, page) => total + page.lines.length, 0)
+  if (!lines) return
+  const presigned = await presignMaster(chapterId, log, 'speakers')
+  if (!presigned) return
+  try {
+    await commands.farmPutDocument(
+      presigned.url,
+      JSON.stringify({ chapterId, at: new Date().toISOString(), pages: named }),
+      'application/json',
+    )
+    log(`speakers recorded for ${lines} line(s)`)
+  } catch (error) {
+    log(`speakers upload failed: ${reason(error)}`)
   }
 }
 

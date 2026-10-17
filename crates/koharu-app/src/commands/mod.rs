@@ -114,6 +114,7 @@ pub fn bindings() -> tauri_specta::Builder<tauri_runtime_cef::CefRuntime> {
             farm::farm_page_blocks,
             farm::farm_render_page,
             farm::farm_upload_project,
+            farm::farm_put_document,
             farm::farm_get_agent_credentials,
             farm::farm_set_agent_credentials,
             farm::farm_clear_agent_credentials,
