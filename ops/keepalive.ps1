@@ -85,6 +85,11 @@ function Healthy() {
 }
 
 function Relaunch($why) {
+  # Checked again here, not only at the top of the loop. A build drops the
+  # marker and then replaces koharu.exe and the CEF runtime beside it; a
+  # relaunch that slipped between the loop's check and this point started the
+  # half-written install and died with "Could not find the webview runtime".
+  if (Test-Path $pauseMarker) { Note "skipped relaunch ($why): build in progress"; return }
   Note "relaunching: $why"
   try { & $restart *>> $log } catch { Note ("relaunch error: " + $_.Exception.Message) }
 }
