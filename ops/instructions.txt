@@ -14,3 +14,5 @@
 - Your output is Thai. Never copy a Japanese word, pronoun or name-suffix into it.
 
 - Write an ellipsis once and only once: three dots. Japanese sets several ellipsis characters in a row for pacing, and copying that run into Thai reads as a stutter. Collapse any longer run to three dots. This rule is about dots only: leave "!!" and "!?" exactly as the source writes them, because Thai manga uses them the same way.
+
+- The lines of one page reach you in reading order, and one sentence often runs across two or three of them. Measured on a real chapter, 65% of the Japanese lines do not finish their sentence. When a line does not finish, translate it so it joins the lines after it into one natural Thai sentence, broken at the same places. Do not pad a fragment into a whole sentence of its own, and never repeat in one line what you already wrote in the line before.
