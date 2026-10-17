@@ -31,6 +31,8 @@ pub(crate) struct TextNodeDescriptor {
     pub(crate) font_style: Option<FontStyle>,
     pub(crate) font_size: Option<f32>,
     pub(crate) minimum_font_size: f32,
+    /// Page width in pixels, so a cap can scale with the page.
+    pub(crate) page_width: f32,
     pub(crate) auto_fit: bool,
     pub(crate) alignment: TextAlign,
     pub(crate) writing_mode: WritingMode,
@@ -331,9 +333,21 @@ fn automatic_maximum(
             bounds.width
         }
     } else {
-        24.0
+        // Text outside a balloon used to be capped at a flat 24px whatever the
+        // page measured. On the 1400px pages this pipeline handles that is 1.7%
+        // of the width, and it showed: a quarter of the blocks on a published
+        // chapter sat at exactly that ceiling, a spike no fitting process would
+        // produce. Scale it with the page instead, and never go below the old
+        // value so smaller pages are no worse off than before.
+        (descriptor.page_width * OUTSIDE_BALLOON_FRACTION).max(24.0)
     }
 }
+
+/// Ceiling for text with no balloon, as a fraction of the page width. Chosen
+/// deliberately short of what the old flat cap implies at full size: these are
+/// captions and background lines, and some of them are small because the artist
+/// drew them small.
+const OUTSIDE_BALLOON_FRACTION: f32 = 0.022;
 
 fn is_chinese_or_japanese_language(language: &str) -> bool {
     language

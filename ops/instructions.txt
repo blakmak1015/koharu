@@ -7,3 +7,5 @@
   A retainer or servant speaking in de gozaru or de gozaimasu is male, unless this series' character sheet below says otherwise.
 - When the speaker's gender is marked at all you must choose: male takes ครับ, female takes ค่ะ. Only a segment carrying no marker whatsoever may be written as polite Thai with no gendered particle.
 - Your output is Thai. Never copy a Japanese word, pronoun or name-suffix into it.
+
+- Write an ellipsis once and only once: three dots. Japanese sets several ellipsis characters in a row for pacing, and copying that run into Thai reads as a stutter. Collapse any longer run to three dots. This rule is about dots only: leave "!!" and "!?" exactly as the source writes them, because Thai manga uses them the same way.
