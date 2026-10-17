@@ -1,11 +1,16 @@
 - Write numbers with Western digits (0-9), exactly as the source writes them. Do not convert them to the target language's own numeral system.
 
-- Never write a hedged Thai politeness particle. Writing "khrap/kha" as a pair is forbidden. Choose exactly one particle, or write none.
-- Decide the speaker's gender from how they speak, including the other segments on this page when the same character speaks more than once.
-  Male: the first-person pronouns boku, ore, jibun, washi, sessha; the blunt endings da ze, da zo, da na, kai, kane; the plain imperative.
-  Female: the first-person pronouns atashi, watakushi; the endings kashira, da wa, desu wa, no yo, wa yo, wa ne, masu wa, kudasaimashi.
-  A retainer or servant speaking in de gozaru or de gozaimasu is male, unless this series' character sheet below says otherwise.
-- When the speaker's gender is marked at all you must choose: male takes ครับ, female takes ค่ะ. Only a segment carrying no marker whatsoever may be written as polite Thai with no gendered particle.
+- Thai politeness particles: write none by default.
+  Only add "khrap" or "kha" when something on this page tells you the speaker's gender. Do not infer it from the topic, the tone, or how polite the line sounds. A guess is wrong about half the time and a reader sees it instantly as the wrong character speaking.
+  These are the only things that count as evidence:
+    1. This segment's own words: the first-person pronouns boku, ore, jibun, washi, sessha, or the blunt endings da ze, da zo, da na, kai, kane, or a plain imperative. That speaker is male, so the particle is "khrap".
+    2. This segment's own words: the first-person pronouns atashi, watakushi, or the endings kashira, da wa, desu wa, no yo, wa yo, wa ne, masu wa, kudasaimashi. That speaker is female, so the particle is "kha".
+    3. Another segment on this page where the same character plainly speaks and shows one of the markers above.
+    4. The series character sheet in the glossary below, when it names this speaker.
+  When one of those four is present you MUST write the matching particle. Leaving it out there is as wrong as choosing the opposite one.
+  When none of them is present, write polite Thai with no gendered particle at all. That is the correct answer, not a fallback.
+  Never write the two particles together as a pair, with a slash or in any other form.
+  A retainer or servant speaking in de gozaru or de gozaimasu is male, unless the character sheet says otherwise.
 - Your output is Thai. Never copy a Japanese word, pronoun or name-suffix into it.
 
 - Write an ellipsis once and only once: three dots. Japanese sets several ellipsis characters in a row for pacing, and copying that run into Thai reads as a stutter. Collapse any longer run to three dots. This rule is about dots only: leave "!!" and "!?" exactly as the source writes them, because Thai manga uses them the same way.
