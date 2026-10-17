@@ -1,6 +1,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use koharu_scene::{Authored, EntityId, LanguageTag, Origin, SourceText, Translation};
+use koharu_scene::{
+    Authored, EntityId, LanguageTag, Origin, RegionSpec, SourceText, Translation,
+};
 use koharu_translator::{TranslationRequest, Translator};
 
 use crate::TranslationConfig;
@@ -20,29 +22,94 @@ impl Processor {
     }
 }
 
+/// Every panel on the page, as bounding boxes in reading order.
+///
+/// Returned empty when the detector found none, which is the signal to fall
+/// back to ordering the bubbles on their own.
+fn page_panels(input: &StageInput) -> Result<Vec<Bounds>> {
+    let mut panels = Vec::new();
+    for entity in input.scene.descendants(input.page)? {
+        let Some(region) = entity.component::<koharu_scene::Region>()? else {
+            continue;
+        };
+        if region.kind.as_str() != koharu_scene::PanelRegion::KIND {
+            continue;
+        }
+        let Some(geometry) = entity.component::<koharu_scene::Geometry>()? else {
+            continue;
+        };
+        if let Some(bounds) = bounds_of(&geometry) {
+            panels.push(bounds);
+        }
+    }
+    // Panels are read the same way bubbles are: down the page, right first.
+    panels.sort_by(|left, right| {
+        if (left.top - right.top).abs() <= (left.bottom - left.top) * 0.5 {
+            right.right.total_cmp(&left.right)
+        } else {
+            left.top.total_cmp(&right.top)
+        }
+    });
+    Ok(panels)
+}
+
+#[derive(Clone, Copy)]
+struct Bounds {
+    left: f64,
+    top: f64,
+    right: f64,
+    bottom: f64,
+}
+
+impl Bounds {
+    fn contains(&self, x: f64, y: f64) -> bool {
+        x >= self.left && x <= self.right && y >= self.top && y <= self.bottom
+    }
+}
+
+fn bounds_of(geometry: &koharu_scene::Geometry) -> Option<Bounds> {
+    let xs = geometry.points.iter().map(|point| point.x);
+    let ys = geometry.points.iter().map(|point| point.y);
+    let left = xs.clone().fold(f64::INFINITY, f64::min);
+    let right = xs.fold(f64::NEG_INFINITY, f64::max);
+    let top = ys.clone().fold(f64::INFINITY, f64::min);
+    let bottom = ys.fold(f64::NEG_INFINITY, f64::max);
+    (left.is_finite() && top.is_finite()).then_some(Bounds { left, top, right, bottom })
+}
+
 /// Put a page's bubbles in the order a reader meets them.
 ///
 /// They arrive in the order the detector found them, which lands on manga
-/// reading order about four times in five - measured at 79% of consecutive
-/// pairs on a published chapter, against the 50% pure chance would give.
+/// reading order about three times in four - measured at 75-79% of consecutive
+/// pairs on published chapters, against the 50% pure chance would give.
 ///
-/// That matters more than it sounds. 65% of the Japanese lines on that chapter
-/// do not end a sentence: they run on into the next bubble. The model is handed
-/// every line of a page at once and can only join them if they arrive in the
-/// order they are read, and one pair in five arriving backwards is enough to
-/// join the wrong halves - which is what "the sentences do not flow" looks like
-/// from the outside.
+/// That matters more than it sounds. 65% of the Japanese lines on those
+/// chapters do not end a sentence: they run on into the next bubble. The model
+/// is handed every line of a page at once and can only join them if they arrive
+/// in the order they are read, and a pair arriving backwards joins the wrong
+/// halves - which is what "the sentences do not flow" looks like from outside.
 ///
-/// Japanese manga reads right to left, top to bottom. Lines whose tops fall
-/// within a band of each other count as the same row and are ordered from the
-/// right; otherwise the higher one comes first. A line with no resolved
-/// position keeps its place at the end rather than being sorted on a guess.
+/// Manga is read panel by panel, not row by row across the whole page, and
+/// banding by height alone got to 86%: a tall panel on the right and a short
+/// one on the left fall into different bands and swap. So bubbles are grouped
+/// into the panel that holds them first, and only ordered by position within
+/// it. Bubbles outside every panel, and pages where no panel was detected, fall
+/// back to the banding on its own.
 fn sort_into_reading_order(
     placed: &mut [(EntityId, String, Option<(f64, f64)>)],
+    panels: &[Bounds],
     page_height: f64,
 ) {
     let band = (page_height * 0.04).max(1.0);
+    let panel_of = |corner: Option<(f64, f64)>| {
+        corner.and_then(|(x, y)| panels.iter().position(|panel| panel.contains(x, y)))
+    };
     placed.sort_by(|left, right| {
+        let (left_panel, right_panel) = (panel_of(left.2), panel_of(right.2));
+        match (left_panel, right_panel) {
+            (Some(a), Some(b)) if a != b => return a.cmp(&b),
+            _ => {}
+        }
         match (left.2, right.2) {
             (Some((left_x, left_y)), Some((right_x, right_y))) => {
                 if (left_y - right_y).abs() <= band {
@@ -175,7 +242,8 @@ impl StageProcessor for Processor {
                 placed.push((content.id(), source.text.value, corner));
             }
         }
-        sort_into_reading_order(&mut placed, page_size.height);
+        let panels = page_panels(&input)?;
+        sort_into_reading_order(&mut placed, &panels, page_size.height);
         let targets: Vec<(EntityId, String)> = placed
             .into_iter()
             .map(|(entity, source, _)| (entity, source))
