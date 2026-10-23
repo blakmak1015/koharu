@@ -1558,3 +1558,129 @@ async fn user_promotion_protects_generated_entity_and_relation_lifecycle() {
         Err(Error::Authorship(_))
     ));
 }
+
+fn detected_typography(origin: Origin) -> Typography {
+    Typography {
+        origin,
+        preferred_font: None,
+        font_weight: None,
+        font_style: None,
+        size: None,
+        auto_fit: true,
+        color: None,
+        stroke_color: None,
+        stroke_width: None,
+        alignment: None,
+        writing_mode: Some(WritingMode::Vertical),
+        extensions: BTreeMap::new(),
+    }
+}
+
+/// The translation stage must be able to note who speaks a detected line.
+///
+/// It used to keep the speaker inside the Typography the detection stage owns,
+/// which the scene rejects - that failed ten whole chapters before it was
+/// noticed, because the stage error aborts the page and then the job.
+#[tokio::test]
+async fn translation_records_a_speaker_beside_detected_typography() {
+    let mut session = Session::memory().await.unwrap();
+    let mut page_id = None;
+    let patch = session
+        .snapshot()
+        .patch(|edit| {
+            page_id = Some(edit.add_page(page(), At::End)?);
+            Ok(())
+        })
+        .unwrap();
+    let snapshot = session.commit(patch).await.unwrap().snapshot;
+    let page_entity = page_id.unwrap();
+
+    // Detection creates the layer and owns its typography, as it does for every
+    // region it finds - there is no page where this does not happen.
+    let detection = Generation::new(ProducerId::new("dev.koharu.pipeline.detection").unwrap());
+    let mut edit = snapshot.edit_as(detection.clone());
+    let content = edit.add_text_content(page_entity, At::End).unwrap();
+    let layer = edit
+        .add_text_layer(
+            page_entity,
+            At::End,
+            content,
+            &TextLayout {
+                origin: Origin::Generated(detection.clone()),
+                kind: TextLayoutKind::Paragraph,
+                angle_degrees: None,
+            },
+        )
+        .unwrap();
+    edit.set(layer, &detected_typography(Origin::Generated(detection)))
+        .unwrap();
+    let snapshot = session
+        .commit(edit.finish().unwrap())
+        .await
+        .unwrap()
+        .snapshot;
+
+    let translation = Generation::new(ProducerId::new("dev.koharu.pipeline.translation").unwrap());
+    let mut edit = snapshot.edit_as(translation.clone());
+
+    // The old way, which must keep failing loudly rather than silently working.
+    assert!(matches!(
+        edit.set(
+            layer,
+            &detected_typography(Origin::Generated(translation.clone()))
+        ),
+        Err(Error::Authorship(_))
+    ));
+
+    edit.set(
+        layer,
+        &Speaker {
+            origin: Origin::Generated(translation.clone()),
+            who: "female - short dark hair".to_owned(),
+        },
+    )
+    .unwrap();
+    let snapshot = session
+        .commit(edit.finish().unwrap())
+        .await
+        .unwrap()
+        .snapshot;
+    assert_eq!(
+        snapshot.component::<Speaker>(layer).unwrap().unwrap().who,
+        "female - short dark hair"
+    );
+    // Typography is untouched: the balloons still fit.
+    assert!(
+        snapshot
+            .component::<Typography>(layer)
+            .unwrap()
+            .unwrap()
+            .auto_fit
+    );
+
+    // The pipeline retries a page that failed, so the second pass must pass too.
+    let mut rerun = snapshot.edit_as(translation.clone());
+    rerun
+        .set(
+            layer,
+            &Speaker {
+                origin: Origin::Generated(translation),
+                who: "female - named on this page".to_owned(),
+            },
+        )
+        .unwrap();
+
+    // Another producer still may not take it over.
+    let other = Generation::new(ProducerId::new("dev.koharu.pipeline.other").unwrap());
+    let mut other_edit = snapshot.edit_as(other.clone());
+    assert!(matches!(
+        other_edit.set(
+            layer,
+            &Speaker {
+                origin: Origin::Generated(other),
+                who: "wrong owner".to_owned(),
+            },
+        ),
+        Err(Error::Authorship(_))
+    ));
+}

@@ -24,42 +24,27 @@ impl Processor {
 
 /// Keep what the model read off the page, one entry per bubble it could name.
 ///
-/// Reads the existing typography and changes one key. Writing a fresh one would
-/// set `auto_fit` to false and silently stop every one of these bubbles being
-/// fitted to its balloon - the field defaults the wrong way for this purpose.
+/// Its own component, not a Typography extension: Typography on a detected
+/// layer is owned by the detection stage and the scene rejects a cross-producer
+/// write, which used to fail the whole chapter.
 fn record_speakers(
-    input: &StageInput,
     edit: &mut koharu_scene::Edit,
     layers: &[EntityId],
     speakers: &[String],
 ) -> Result<()> {
     for (layer, speaker) in layers.iter().zip(speakers) {
-        let speaker = speaker.trim();
-        if speaker.is_empty() || speaker.to_ascii_lowercase().starts_with("unknown") {
+        let who = speaker.trim();
+        if who.is_empty() || who.to_ascii_lowercase().starts_with("unknown") {
             continue;
         }
-        edit.observe::<koharu_scene::Typography>(*layer)?;
-        let mut typography = input
-            .scene
-            .component::<koharu_scene::Typography>(*layer)?
-            .unwrap_or(koharu_scene::Typography {
+        edit.observe::<koharu_scene::Speaker>(*layer)?;
+        edit.set(
+            *layer,
+            &koharu_scene::Speaker {
                 origin: Origin::Generated(generation(PRODUCER, "speaker")?),
-                preferred_font: None,
-                font_weight: None,
-                font_style: None,
-                size: None,
-                auto_fit: true,
-                color: None,
-                stroke_color: None,
-                stroke_width: None,
-                alignment: None,
-                writing_mode: None,
-                extensions: Default::default(),
-            });
-        typography
-            .extensions
-            .insert(crate::SPEAKER_KEY.to_owned(), speaker.to_owned());
-        edit.set(*layer, &typography)?;
+                who: who.to_owned(),
+            },
+        )?;
     }
     Ok(())
 }
@@ -85,14 +70,36 @@ fn page_panels(input: &StageInput) -> Result<Vec<Bounds>> {
         }
     }
     // Panels are read the same way bubbles are: down the page, right first.
-    panels.sort_by(|left, right| {
-        if (left.top - right.top).abs() <= (left.bottom - left.top) * 0.5 {
-            right.right.total_cmp(&left.right)
-        } else {
-            left.top.total_cmp(&right.top)
+    let items: Vec<(usize, f64, f64)> = panels.iter().map(|panel| (0, panel.top, panel.right)).collect();
+    let order = reading_order(&items, |first| (panels[first].bottom - panels[first].top) * 0.5);
+    Ok(order.into_iter().map(|index| panels[index]).collect())
+}
+
+/// Indices of `items` - (group, y, x) - in reading order: group by group, down
+/// the page row by row, right to left within a row.
+///
+/// An item joins a row while it is within `band` of the row's FIRST item.
+/// Comparing pairs instead ("these two are close enough to share a row") is not
+/// transitive, and the standard sort panics on a comparator that is not a total
+/// order - which wedged the farm's pipeline twice on 2026-10-23.
+fn reading_order(items: &[(usize, f64, f64)], band: impl Fn(usize) -> f64) -> Vec<usize> {
+    let mut down: Vec<usize> = (0..items.len()).collect();
+    down.sort_by(|&a, &b| items[a].0.cmp(&items[b].0).then_with(|| items[a].1.total_cmp(&items[b].1)));
+    let mut row = vec![0_usize; items.len()];
+    let (mut current, mut anchor) = (0_usize, None::<usize>);
+    for &index in &down {
+        let joins = anchor.is_some_and(|first| {
+            items[index].0 == items[first].0 && items[index].1 - items[first].1 <= band(first)
+        });
+        if !joins {
+            current += 1;
+            anchor = Some(index);
         }
-    });
-    Ok(panels)
+        row[index] = current;
+    }
+    let mut order: Vec<usize> = (0..items.len()).collect();
+    order.sort_by(|&a, &b| row[a].cmp(&row[b]).then_with(|| items[b].2.total_cmp(&items[a].2)));
+    order
 }
 
 #[derive(Clone, Copy)]
@@ -143,29 +150,27 @@ fn sort_into_reading_order(
     page_height: f64,
 ) {
     let band = (page_height * 0.04).max(1.0);
-    let panel_of = |corner: Option<(f64, f64)>| {
-        corner.and_then(|(x, y)| panels.iter().position(|panel| panel.contains(x, y)))
-    };
-    placed.sort_by(|left, right| {
-        let (left_panel, right_panel) = (panel_of(left.3), panel_of(right.3));
-        match (left_panel, right_panel) {
-            (Some(a), Some(b)) if a != b => return a.cmp(&b),
-            _ => {}
-        }
-        match (left.3, right.3) {
-            (Some((left_x, left_y)), Some((right_x, right_y))) => {
-                if (left_y - right_y).abs() <= band {
-                    // same row: the rightmost bubble is read first
-                    right_x.total_cmp(&left_x)
-                } else {
-                    left_y.total_cmp(&right_y)
-                }
+    // Panel i is group 2i+1. A bubble outside every panel goes in the gap before
+    // the first panel that starts below it (an even group); one with no position
+    // goes last, keeping its detector order.
+    let items: Vec<(usize, f64, f64)> = placed
+        .iter()
+        .map(|item| match item.3 {
+            Some((x, y)) => {
+                let group = match panels.iter().position(|panel| panel.contains(x, y)) {
+                    Some(panel) => 2 * panel + 1,
+                    None => 2 * panels.iter().position(|panel| panel.top > y).unwrap_or(panels.len()),
+                };
+                (group, y, x)
             }
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => std::cmp::Ordering::Equal,
-        }
-    });
+            None => (usize::MAX, 0.0, 0.0),
+        })
+        .collect();
+    let sorted: Vec<_> = reading_order(&items, |_| band)
+        .into_iter()
+        .map(|index| placed[index].clone())
+        .collect();
+    placed.clone_from_slice(&sorted);
 }
 
 /// Turns speaker attribution on for one series.
@@ -345,7 +350,7 @@ impl StageProcessor for Processor {
             edit.observe::<SourceText>(*entity)?;
             edit.observe::<Translation>(*entity)?;
         }
-        record_speakers(&input, &mut edit, &layers, &speakers)?;
+        record_speakers(&mut edit, &layers, &speakers)?;
         for ((entity, source), text) in targets.into_iter().zip(translated) {
             if input
                 .scene
@@ -413,4 +418,69 @@ fn collapse_ellipsis(text: &str) -> String {
         out.push_str(&run);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A tiny deterministic generator, so a failure reproduces.
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self, below: f64) -> f64 {
+            self.0 = self.0.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            (self.0 >> 11) as f64 / (1_u64 << 53) as f64 * below
+        }
+    }
+
+    // The farm panicked twice on 2026-10-23 sorting real pages ("comparison
+    // function does not correctly implement a total order"). Rows of bubbles
+    // chained within the band of each other are what triggers it.
+    #[test]
+    fn reading_order_never_panics_on_crowded_pages() {
+        let mut rng = Lcg(7);
+        for _ in 0..3_000 {
+            let panels: Vec<Bounds> = (0..rng.next(8.0) as usize)
+                .map(|_| {
+                    let (left, top) = (rng.next(800.0), rng.next(1_200.0));
+                    Bounds { left, top, right: left + rng.next(500.0), bottom: top + rng.next(400.0) }
+                })
+                .collect();
+            let mut placed: Vec<(EntityId, EntityId, String, Option<(f64, f64)>)> = (0..2 + rng.next(60.0) as usize)
+                .map(|index| {
+                    let corner = (rng.next(10.0) > 0.5).then(|| (rng.next(1_000.0), rng.next(1_200.0)));
+                    (EntityId::new(), EntityId::new(), index.to_string(), corner)
+                })
+                .collect();
+            let mut before: Vec<String> = placed.iter().map(|item| item.2.clone()).collect();
+            sort_into_reading_order(&mut placed, &panels, 1_200.0);
+            let mut after: Vec<String> = placed.iter().map(|item| item.2.clone()).collect();
+            before.sort();
+            after.sort();
+            assert_eq!(before, after, "every bubble kept exactly once");
+        }
+    }
+
+    #[test]
+    fn reads_right_to_left_then_down_panel_by_panel() {
+        // Right panel above the left one by a little: same row, right first.
+        let panels = [
+            Bounds { left: 0.0, top: 10.0, right: 400.0, bottom: 500.0 },
+            Bounds { left: 500.0, top: 0.0, right: 900.0, bottom: 500.0 },
+        ];
+        let item = |name: &str, x: f64, y: f64| (EntityId::new(), EntityId::new(), name.to_owned(), Some((x, y)));
+        let mut placed = vec![
+            item("left-panel", 300.0, 100.0),
+            item("right-low", 700.0, 300.0),
+            item("right-top-left", 600.0, 50.0),
+            item("right-top-right", 850.0, 60.0),
+            (EntityId::new(), EntityId::new(), "unplaced".to_owned(), None),
+        ];
+        let items: Vec<_> = panels.iter().map(|panel| (0, panel.top, panel.right)).collect();
+        let panel_order = reading_order(&items, |first| (panels[first].bottom - panels[first].top) * 0.5);
+        let panels: Vec<Bounds> = panel_order.into_iter().map(|index| panels[index]).collect();
+        sort_into_reading_order(&mut placed, &panels, 1_000.0);
+        let names: Vec<&str> = placed.iter().map(|item| item.2.as_str()).collect();
+        assert_eq!(names, ["right-top-right", "right-top-left", "right-low", "left-panel", "unplaced"]);
+    }
 }

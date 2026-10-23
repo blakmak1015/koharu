@@ -241,15 +241,10 @@ pub(crate) async fn farm_page_blocks(
             color: Some(text.color),
             vertical: matches!(text.writing_mode, WritingMode::VerticalRl),
             speaker: snapshot
-                .component::<koharu_scene::Typography>(layer.entity())
+                .component::<koharu_scene::Speaker>(layer.entity())
                 .ok()
                 .flatten()
-                .and_then(|typography| {
-                    typography
-                        .extensions
-                        .get(koharu_pipeline::SPEAKER_KEY)
-                        .cloned()
-                }),
+                .map(|speaker| speaker.who),
         });
     }
 

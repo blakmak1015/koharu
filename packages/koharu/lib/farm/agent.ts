@@ -73,6 +73,23 @@ const STALL_TIMEOUT_MS = 600_000
 const PIPELINE_ATTEMPTS = 2
 const RETRY_WAIT_MS = 60_000
 
+/**
+ * The pipeline itself is stuck, not this chapter: only a restart clears it.
+ *
+ * On 2026-10-23 a panic inside a stage left koharu's pipeline unable to move,
+ * and every later run either sat at 0/0 or was refused with "another process is
+ * already running". The agent took that as the chapter's fault, failed it and
+ * claimed the next one - 46 chapters in nine hours. Restarting takes a minute.
+ */
+class PipelineWedged extends Error {}
+
+const isWedged = (error: unknown) => /made no progress|already running/.test(reason(error))
+
+// Survives the relaunch (the webview keeps localStorage), so a chapter that
+// wedges the pipeline every time is failed on its second go instead of
+// restarting the box for ever.
+const WEDGED_KEY = 'farm-wedged-job'
+
 // --- state ------------------------------------------------------------------
 
 let state: AgentState = {
@@ -409,6 +426,7 @@ async function translatePages(
       break
     } catch (error) {
       throwIfStopped()
+      if (isWedged(error)) throw new PipelineWedged(reason(error))
       if (attempt >= PIPELINE_ATTEMPTS) throw error
       log(`pipeline failed: ${reason(error)} — retrying (${attempt}/${PIPELINE_ATTEMPTS})`)
       await sendHeartbeat(job.id)
@@ -528,9 +546,19 @@ async function processOneJob(): Promise<boolean> {
   }
   try {
     await processClaim(claim)
+    localStorage.removeItem(WEDGED_KEY)
     return true
   } catch (error) {
     const why = reason(error)
+    if (error instanceof PipelineWedged && localStorage.getItem(WEDGED_KEY) !== claim.job.id) {
+      // Not failed: once heartbeats stop the website puts it back in the queue
+      // (3 minutes), and the restarted pipeline gets another go at it.
+      localStorage.setItem(WEDGED_KEY, claim.job.id)
+      log(`job ${claim.job.id} left for the queue: the pipeline is stuck (${why})`)
+      publish({ currentJob: null })
+      throw error
+    }
+    localStorage.removeItem(WEDGED_KEY)
     log(`job ${claim.job.id} failed: ${why}`)
     await failJob(claim.job.id, why, log)
     publish({ currentJob: null })
@@ -557,6 +585,12 @@ async function loop(): Promise<void> {
       }
     } catch (error) {
       if (stopped()) return
+      if (error instanceof PipelineWedged) {
+        log('restarting koharu to clear the stuck pipeline')
+        stopAgent()
+        await relaunch()
+        return
+      }
       const why = reason(error)
       publish({ status: 'error', lastError: why })
       log(`agent error: ${why}`)

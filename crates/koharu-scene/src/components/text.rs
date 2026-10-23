@@ -220,3 +220,36 @@ impl Component for TextRole {
         true
     }
 }
+
+/// Who the translation stage judged is speaking a text layer's line.
+///
+/// Its own component rather than a Typography extension because Typography on a
+/// detected layer belongs to the detection stage, and the scene refuses a
+/// cross-producer write - which failed whole chapters before this existed.
+#[revisioned(revision = 1)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+pub struct Speaker {
+    pub origin: Origin,
+    pub who: String,
+}
+
+impl Component for Speaker {
+    const KIND: &'static str = "dev.koharu.text.speaker";
+
+    fn validate(&self, _context: &ValidationContext<'_>) -> Result<()> {
+        self.origin.validate()?;
+        if self.who.is_empty() || self.who.len() > 4096 || self.who.contains('\0') {
+            return Err(Error::invalid("speaker is invalid"));
+        }
+        Ok(())
+    }
+
+    fn origin(&self) -> Option<&Origin> {
+        Some(&self.origin)
+    }
+
+    fn set_origin(&mut self, origin: Origin) -> bool {
+        self.origin = origin;
+        true
+    }
+}

@@ -20,12 +20,6 @@ mod stages;
 pub use config::{
     DetectionModel, InpaintingModel, OcrModel, PipelineConfig, ProcessorConfig, TranslationConfig,
 };
-/// Where a bubble's speaker is kept on its text layer.
-///
-/// Written by the translation stage into Typography's extension map - no schema
-/// change - and read back by whatever exports the page. Named here so the two
-/// ends cannot drift apart.
-pub const SPEAKER_KEY: &str = "dev.koharu.speaker";
 
 pub use error::{ErrorKind, PipelineError};
 pub use pipeline::Pipeline;
