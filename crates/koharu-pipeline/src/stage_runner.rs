@@ -8,7 +8,7 @@ use koharu_scene::{EntityId, Patch};
 
 use crate::{
     ErrorKind, PipelineConfig, PipelineError, Progress, ProgressSink, Stage, StopToken,
-    accelerator::AcceleratorGate,
+    accelerator::{AcceleratorGate, AcceleratorPermit},
     progress,
     resources::ResourceMonitor,
     stages::{StageInput, Stages},
@@ -68,7 +68,13 @@ impl StageRunner {
         if skip {
             return Ok(StageOutcome::Skipped);
         }
-        let permit = self.accelerator.acquire().await;
+        // Fork: a remote translator never touches the GPU; holding the one
+        // accelerator lane through its HTTP wait left the GPU idle for it.
+        let permit = if self.stages.uses_accelerator(job.stage) {
+            self.accelerator.acquire().await
+        } else {
+            AcceleratorPermit::cpu()
+        };
         if job.stop.stopped() {
             return Ok(StageOutcome::Stopped);
         }

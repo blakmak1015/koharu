@@ -20,6 +20,13 @@ use crate::{
     stages::StageInput,
 };
 
+/// Fork: pages whose translation may be in flight at once. Every other stage
+/// runs one page at a time, but a remote translator only waits on HTTP, and
+/// measured on 2026-10-24 the GPU (35% busy) and the LLM box (59% busy, one
+/// request at a time) were never working together. Translation takes no context
+/// from earlier pages, so overlapping two loses nothing.
+const TRANSLATION_LANES: usize = 2;
+
 pub(crate) struct Execution<'a> {
     runner: Arc<StageRunner>,
     resources: Arc<ResourceMonitor>,
@@ -31,6 +38,7 @@ pub(crate) struct Execution<'a> {
     scene: Snapshot,
     images: BTreeMap<EntityId, Arc<ImageCache>>,
     busy_stages: BTreeSet<Stage>,
+    translations_running: usize,
     completed: usize,
     failure: Option<PipelineError>,
     base: koharu_scene::Revision,
@@ -83,6 +91,7 @@ impl<'a> Execution<'a> {
             scene: snapshot,
             images: BTreeMap::new(),
             busy_stages: BTreeSet::new(),
+            translations_running: 0,
             completed: 0,
             failure: None,
             base,
@@ -109,7 +118,11 @@ impl<'a> Execution<'a> {
             let Some(completion) = running.next().await else {
                 break;
             };
-            self.busy_stages.remove(&completion.stage);
+            if completion.stage == Stage::Translation {
+                self.translations_running = self.translations_running.saturating_sub(1);
+            } else {
+                self.busy_stages.remove(&completion.stage);
+            }
             if self.stopped() || self.failure.is_some() {
                 continue;
             }
@@ -125,8 +138,16 @@ impl<'a> Execution<'a> {
         if self.stopped() || self.failure.is_some() {
             return None;
         }
-        let (page, stage) = self.scheduler.start_next(&self.busy_stages)?;
-        self.busy_stages.insert(stage);
+        let mut busy = self.busy_stages.clone();
+        if self.translations_running >= TRANSLATION_LANES {
+            busy.insert(Stage::Translation);
+        }
+        let (page, stage) = self.scheduler.start_next(&busy)?;
+        if stage == Stage::Translation {
+            self.translations_running += 1;
+        } else {
+            self.busy_stages.insert(stage);
+        }
         let images = self
             .images
             .entry(page)

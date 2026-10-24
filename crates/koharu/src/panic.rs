@@ -22,6 +22,13 @@ pub fn install() {
             client.flush(Some(Duration::from_secs(2)));
         }
 
+        // Fork: the unattended farm (same flag as koharu-app's background_mode)
+        // has nobody to click OK. The dialog held a crashed process open for
+        // hours on 2026-10-23/24; exiting lets the keepalive relaunch it.
+        if std::env::var("KOHARU_TRAY_START").is_ok_and(|value| value.trim() == "1") {
+            std::process::exit(1);
+        }
+
         rfd::MessageDialog::new()
             .set_level(rfd::MessageLevel::Error)
             .set_title("Koharu has stopped")

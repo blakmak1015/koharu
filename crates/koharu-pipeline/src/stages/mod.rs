@@ -118,6 +118,11 @@ impl Stages {
     pub(crate) fn unload(&self, stage: Stage) -> bool {
         self.processor(stage).unload()
     }
+
+    /// Everything but a remote translator runs on the accelerator.
+    pub(crate) fn uses_accelerator(&self, stage: Stage) -> bool {
+        stage != Stage::Translation || self.translation.is_local()
+    }
 }
 
 fn generation(producer: &str, model: &str) -> Result<Generation> {

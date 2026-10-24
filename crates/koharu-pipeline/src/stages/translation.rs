@@ -20,6 +20,11 @@ impl Processor {
     pub(super) fn new(config: TranslationConfig, translator: Translator) -> Self {
         Self { config, translator }
     }
+
+    /// An in-process model, which needs the GPU like any other stage.
+    pub(super) fn is_local(&self) -> bool {
+        self.config.model.provider == koharu_translator::Provider::Local
+    }
 }
 
 /// Keep what the model read off the page, one entry per bubble it could name.
