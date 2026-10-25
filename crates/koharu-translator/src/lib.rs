@@ -143,8 +143,7 @@ impl Translator {
                 .translate(request, generation)
                 .await?
         } else {
-            let providers = self.providers.read()?.clone();
-            remote::translate(&self.client, &providers, selection, &generation, &request).await?
+            self.translate_remote(selection, &generation, &request).await?
         };
         if translated.len() != expected {
             return Err(Error::SegmentCount {
@@ -156,6 +155,48 @@ impl Translator {
         }
         tracing::Span::current().record("outcome", "completed");
         Ok((provider_id, translated))
+    }
+
+    /// Fork: a model that loops on one bubble ("วววว…") runs into `max_tokens`
+    /// and returns cut-off JSON, which used to fail the whole chapter (twice,
+    /// with the agent's retry). Retry the page once with a repetition penalty,
+    /// then bubble by bubble; a bubble that still loops is left empty and
+    /// logged rather than failing every other page of the chapter.
+    async fn translate_remote(
+        &self,
+        selection: &ModelSelection,
+        generation: &GenerationConfig,
+        request: &TranslationRequest,
+    ) -> Result<Vec<String>> {
+        let providers = self.providers.read()?.clone();
+        let runaway = |error: &Error| error.to_string().contains("invalid translation JSON");
+        match remote::translate(&self.client, &providers, selection, generation, request).await {
+            Err(error) if runaway(&error) => {}
+            other => return other,
+        }
+        let mut calmer = *generation;
+        calmer.frequency_penalty = Some(calmer.frequency_penalty.unwrap_or(0.0).max(0.6));
+        tracing::warn!(segments = request.segments.len(), "translation ran away; retrying the page with a repetition penalty");
+        match remote::translate(&self.client, &providers, selection, &calmer, request).await {
+            Err(error) if runaway(&error) => {}
+            other => return other,
+        }
+        tracing::warn!("translation still runs away; translating bubble by bubble");
+        let mut translated = Vec::with_capacity(request.segments.len());
+        for segment in &request.segments {
+            let mut single = request.clone();
+            single.segments = vec![segment.clone()];
+            match remote::translate(&self.client, &providers, selection, &calmer, &single).await {
+                Ok(mut text) if text.len() == 1 => translated.push(text.remove(0)),
+                Ok(_) => translated.push(String::new()),
+                Err(error) if runaway(&error) => {
+                    tracing::warn!(%segment, "bubble left untranslated: the model loops on it");
+                    translated.push(String::new());
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(translated)
     }
 
     #[tracing::instrument(skip_all)]
