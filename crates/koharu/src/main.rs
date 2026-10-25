@@ -38,7 +38,8 @@ async fn main() {
                     .from_env_lossy(),
             )
             .with(sentry::tracing_layer().with_filter(filter.clone()))
-            .with(koharu_metrics::layer())
+            // Fork: no koharu_metrics layer. Upstream's layer posts usage events to
+            // its own Google Analytics property; our farm's activity is not theirs to collect.
             .with(koharu::tracing::TimingLayer::new().with_filter(filter)),
     )
     .expect("failed to set the global tracing subscriber");
