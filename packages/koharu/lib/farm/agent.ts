@@ -342,11 +342,11 @@ async function processClaim(claim: ClaimedJob): Promise<void> {
 
   // Heartbeat before anything slow: this extends the lease immediately, so a
   // crash early on does not leave the job orphaned for the whole lease window.
-  await sendHeartbeat(job.id)
+  const done = new Set(claim.donePageNumbers ?? [])
+  await sendHeartbeat(job.id, { page: done.size, pages: claim.pages.length })
   const heartbeat = setInterval(() => void sendHeartbeat(job.id), HEARTBEAT_MS)
 
   try {
-    const done = new Set(claim.donePageNumbers ?? [])
     const remaining = claim.pages.filter((page) => !done.has(page.pageNumber))
     if (done.size) log(`resuming: ${done.size} page(s) already done, ${remaining.length} remaining`)
     if (remaining.length === 0) {
@@ -364,7 +364,7 @@ async function processClaim(claim: ClaimedJob): Promise<void> {
     await sendHeartbeat(job.id)
     await applyGlossary(claim.systemPrompt)
 
-    const uploaded = await translatePages(job, pageIds, remaining)
+    const uploaded = await translatePages(job, pageIds, remaining, done.size, claim.pages.length)
     uploaded.sort((left, right) => left.pageNumber - right.pageNumber)
 
     publish({ status: 'uploading' })
@@ -400,6 +400,8 @@ async function translatePages(
   job: AgentJob,
   pageIds: EntityId[],
   pages: AgentPage[],
+  pagesBefore: number,
+  pagesInChapter: number,
 ): Promise<CompletePage[]> {
   // Retried as a whole, which is cheap: every stage implements `skip`, so a
   // second run leaves the pages it already detected, OCR'd and inpainted
@@ -414,13 +416,17 @@ async function translatePages(
         { operation: 'full' },
       )
       let lastBeat = 0
+      let lastPage = -1
       await awaitJob(jobId, (done, total) => {
         log(`pipeline ${done}/${total}`)
+        // total counts page x stage, so this is the pages through every stage
+        const page = pagesBefore + (total ? Math.floor((done * pageIds.length) / total) : 0)
         // The lease has to outlive the whole chapter, and the pipeline can
         // spend minutes on one page.
-        if (Date.now() - lastBeat > HEARTBEAT_MS) {
+        if (page !== lastPage || Date.now() - lastBeat > HEARTBEAT_MS) {
           lastBeat = Date.now()
-          void sendHeartbeat(job.id)
+          lastPage = page
+          void sendHeartbeat(job.id, { page, pages: pagesInChapter })
         }
       })
       break

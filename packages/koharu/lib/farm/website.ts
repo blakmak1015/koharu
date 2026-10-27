@@ -166,11 +166,15 @@ export async function claimJob(log?: Logger): Promise<ClaimResponse> {
 }
 
 /** Heartbeats extend the lease. Losing one is not worth failing a job over. */
-export async function sendHeartbeat(jobId: string): Promise<void> {
+export async function sendHeartbeat(
+  jobId: string,
+  // pages done / pages in the chapter, shown on /admin/agents; left out, the site keeps the last value
+  progress?: { page: number; pages: number },
+): Promise<void> {
   try {
     await agentFetch(
       '/api/admin/translation/agent/heartbeat',
-      { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jobId }) },
+      { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jobId, ...progress }) },
       15_000,
     )
   } catch {
