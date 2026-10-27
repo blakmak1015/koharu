@@ -159,11 +159,12 @@ impl TextRenderer {
             width: descriptor.width,
             height: descriptor.height,
         };
-        let bounds = if is_bubble_text {
-            inset(frame, descriptor.text_inset)
+        let text_inset = if is_bubble_text {
+            effective_inset(frame, descriptor.text_inset)
         } else {
-            frame
+            [0.0; 4]
         };
+        let bounds = inset(frame, text_inset);
         if bounds.width <= 0.0 || bounds.height <= 0.0 {
             return Err(Error::invalid(format!(
                 "text inset leaves no layout area for entity {}",
@@ -212,13 +213,13 @@ impl TextRenderer {
                 .with_max_height(bounds.height);
         }
         if let Some(contour) = &descriptor.balloon_contour {
-            let [top, _, _, left] = descriptor.text_inset;
+            let [top, _, _, left] = text_inset;
             let contour = contour.iter().map(|&(x, y)| (x - left, y - top)).collect();
             layout = layout.with_comic_balloon(
                 bounds.width,
                 bounds.height,
                 contour,
-                descriptor.text_inset.into_iter().fold(0.0, f32::max),
+                text_inset.into_iter().fold(0.0, f32::max),
             );
         }
         if let Some(language) = &descriptor.language {
@@ -365,6 +366,18 @@ fn inset(rect: LayoutBox, [top, right, bottom, left]: [f32; 4]) -> LayoutBox {
     }
 }
 
+/// The inset, or none when the box is too small to keep it. A balloon detected
+/// at a few pixels used to fail its page, and with it the whole chapter
+/// (Kuroiwa Medaka 180, 2026-10-27); tight text beats no translation.
+fn effective_inset(frame: LayoutBox, padding: [f32; 4]) -> [f32; 4] {
+    let padded = inset(frame, padding);
+    if padded.width > 0.0 && padded.height > 0.0 {
+        padding
+    } else {
+        [0.0; 4]
+    }
+}
+
 fn placement(rect: LayoutBox, width: f32, height: f32) -> (f32, f32) {
     let x = rect.x + (rect.width - width) * 0.5;
     let remaining = rect.height - height;
@@ -473,6 +486,7 @@ mod tests {
             font_style: None,
             font_size: Some(6.0),
             minimum_font_size: 9.0,
+            page_width: 0.0,
             auto_fit: true,
             alignment: TextAlign::Center,
             writing_mode: WritingMode::Horizontal,
@@ -493,6 +507,19 @@ mod tests {
 
         assert_eq!(automatic_maximum(&descriptor, bounds, false), 24.0);
         assert_eq!(automatic_maximum(&descriptor, bounds, true), 240.0);
+    }
+
+    #[test]
+    fn tiny_balloon_drops_the_inset_instead_of_failing() {
+        let frame = |width, height| LayoutBox {
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
+        };
+        assert_eq!(effective_inset(frame(100.0, 40.0), [4.0; 4]), [4.0; 4]);
+        assert_eq!(effective_inset(frame(100.0, 6.0), [4.0; 4]), [0.0; 4]);
+        assert_eq!(effective_inset(frame(8.0, 40.0), [4.0; 4]), [0.0; 4]);
     }
 
     #[test]
