@@ -29,6 +29,7 @@ import {
   type AgentPage,
   type ClaimedJob,
   type CompletePage,
+  type PipelineVersion,
 } from './website'
 
 export type AgentStatus =
@@ -297,6 +298,27 @@ async function applyGlossary(systemPrompt: string | null | undefined): Promise<v
   )
 }
 
+/**
+ * The build, model and pinned prompt this chapter was translated with.
+ *
+ * The prompt is the supervisor's base instructions only: the per-series
+ * glossary changes every chapter and would make every hash different. FNV-1a
+ * rather than crypto.subtle, which a non-secure webview origin may not have.
+ */
+async function pipelineVersion(): Promise<PipelineVersion> {
+  const { pipeline } = await commands.getPreferences()
+  const { provider, model } = pipeline.translation.model
+  let hash = 0x811c9dc5
+  for (const char of baseInstructions ?? '') {
+    hash = Math.imul(hash ^ (char.codePointAt(0) ?? 0), 0x01000193) >>> 0
+  }
+  return {
+    build: process.env.NEXT_PUBLIC_KOHARU_BUILD || 'unknown',
+    model: model ? `${provider}/${model}` : String(provider),
+    prompt: hash.toString(16).padStart(8, '0'),
+  }
+}
+
 // --- one chapter --------------------------------------------------------------
 
 async function uploadFinishedPage(
@@ -377,7 +399,8 @@ async function processClaim(claim: ClaimedJob): Promise<void> {
     const masterKey = await uploadMaster(job.chapterId, log)
     await uploadSpeakers(job.chapterId, uploaded, log)
     log('completing job...')
-    await completeJob(job.id, uploaded, log, masterKey ?? undefined)
+    const pipeline = await pipelineVersion().catch(() => undefined)
+    await completeJob(job.id, uploaded, log, masterKey ?? undefined, pipeline)
     log(`job ${job.id} completed`)
     publish({ currentJob: null, processedCount: state.processedCount + 1 })
   } finally {

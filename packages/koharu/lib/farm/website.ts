@@ -66,6 +66,13 @@ export type CompletePage = {
   pageHeight?: number
 }
 
+/** What a chapter was translated with; the website keeps it to find chapters done by older versions. */
+export type PipelineVersion = {
+  build: string
+  model: string
+  prompt: string
+}
+
 /**
  * fetch() has no default timeout, and the agent lives in a webview that runs
  * for weeks. One stalled connection used to hang the loop for hours with
@@ -251,13 +258,19 @@ export async function completeJob(
   pages: CompletePage[],
   log?: Logger,
   masterKhrprojKey?: string,
+  pipeline?: PipelineVersion,
 ): Promise<void> {
   const response = await agentFetch(
     '/api/admin/translation/agent/complete',
     {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ jobId, pages, ...(masterKhrprojKey ? { masterKhrprojKey } : {}) }),
+      body: JSON.stringify({
+        jobId,
+        pages,
+        ...(masterKhrprojKey ? { masterKhrprojKey } : {}),
+        ...(pipeline ? { pipeline } : {}),
+      }),
     },
     180_000,
     1,
