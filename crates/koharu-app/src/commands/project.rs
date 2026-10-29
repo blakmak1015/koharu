@@ -556,7 +556,10 @@ impl Project {
                         auto_fit: update.typography.auto_fit,
                         color: update.typography.color,
                         stroke_color: update.typography.stroke_color,
-                        stroke_width: update.typography.stroke_width,
+                        stroke_width: update
+                            .typography
+                            .stroke_width
+                            .map(|width| width.min(SceneTypography::MAX_STROKE_WIDTH)),
                         alignment: update.typography.alignment,
                         writing_mode: update.typography.writing_mode,
                         extensions: Default::default(),

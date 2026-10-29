@@ -99,6 +99,19 @@ pub(crate) fn is_chinese_or_japanese_text(text: &str) -> bool {
     })
 }
 
+/// Thai by language tag, or by any Thai letter when the tag is missing.
+pub(crate) fn is_thai(text: &str, language: Option<&str>) -> bool {
+    if let Some(language) = language {
+        return language
+            .split(['-', '_'])
+            .next()
+            .is_some_and(|primary| primary.eq_ignore_ascii_case("th"));
+    }
+    let script_map = CodePointMapData::<IcuScript>::new();
+    text.chars()
+        .any(|character| script_map.get(character) == IcuScript::Thai)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,6 +137,14 @@ mod tests {
         let (direction, script) = shaping_direction_for_text("مرحبا", WritingMode::Horizontal);
         assert_eq!(direction, Direction::RightToLeft);
         assert_eq!(script.unwrap().tag(), Tag::new(b"Arab"));
+    }
+
+    #[test]
+    fn thai_is_detected_by_tag_or_by_script() {
+        assert!(is_thai("อะไร", Some("th-TH")));
+        assert!(is_thai("อะไรนะ!?", None));
+        assert!(!is_thai("日本語", Some("ja")));
+        assert!(!is_thai("English", None));
     }
 
     #[test]

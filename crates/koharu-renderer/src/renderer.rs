@@ -41,7 +41,7 @@ use crate::{
         prepare_frame,
     },
     images::{DecodedImage, ImageCache, decode},
-    script::{is_chinese_or_japanese_text, shaping_direction_for_text},
+    script::{is_chinese_or_japanese_text, is_thai, shaping_direction_for_text},
     text_renderer::{StrokeOptions, TextNodeDescriptor, TextRenderer},
 };
 
@@ -809,8 +809,13 @@ impl Traversal<'_> {
             } else {
                 None
             };
-        let writing_mode =
-            resolve_writing_mode(&text, frame.bounds, typography.as_ref(), analysis.as_ref());
+        let writing_mode = resolve_writing_mode(
+            &text,
+            translation.language.as_ref().map(koharu_scene::LanguageTag::as_str),
+            frame.bounds,
+            typography.as_ref(),
+            analysis.as_ref(),
+        );
         let (direction, _) = shaping_direction_for_text(&text, writing_mode);
         let alignment = resolve_alignment(
             typography.as_ref().and_then(|value| value.alignment),
@@ -1437,10 +1442,16 @@ fn surface_size(page: &Page) -> Result<(u32, u32)> {
 
 fn resolve_writing_mode(
     text: &str,
+    language: Option<&str>,
     bounds: LayoutBox,
     typography: Option<&Typography>,
     analysis: Option<&OcrAnalysis>,
 ) -> WritingMode {
+    // Thai is never set vertically, whatever the source layout or a stray
+    // kana left in the translation says.
+    if is_thai(text, language) {
+        return WritingMode::Horizontal;
+    }
     let typography_mode = typography
         .and_then(|value| value.writing_mode)
         .map(|mode| match mode {
@@ -1490,7 +1501,11 @@ fn resolve_alignment(
 
 fn resolve_stroke(typography: Option<&Typography>) -> Option<StrokeOptions> {
     let typography = typography?;
-    let width_px = typography.stroke_width.filter(|width| *width > 0.0)?;
+    // Also clamped here so projects detected before the cap render within it.
+    let width_px = typography
+        .stroke_width
+        .filter(|width| *width > 0.0)?
+        .min(Typography::MAX_STROKE_WIDTH);
     Some(StrokeOptions {
         color: typography.stroke_color.unwrap_or([u8::MAX; 4]),
         width_px,
@@ -1766,12 +1781,12 @@ mod tests {
         };
 
         assert_eq!(
-            resolve_writing_mode("rokuna", bounds, Some(&typography), None),
+            resolve_writing_mode("rokuna", None, bounds, Some(&typography), None),
             WritingMode::VerticalRl
         );
         typography.writing_mode = Some(koharu_scene::WritingMode::Horizontal);
         assert_eq!(
-            resolve_writing_mode("日本語", bounds, Some(&typography), None),
+            resolve_writing_mode("日本語", None, bounds, Some(&typography), None),
             WritingMode::Horizontal
         );
     }
@@ -1802,13 +1817,77 @@ mod tests {
         };
 
         assert_eq!(
-            resolve_writing_mode("rokuna", bounds, Some(&typography), None),
+            resolve_writing_mode("rokuna", None, bounds, Some(&typography), None),
             WritingMode::Horizontal
         );
         assert_eq!(
-            resolve_writing_mode("繁體中文", bounds, Some(&typography), None),
+            resolve_writing_mode("繁體中文", None, bounds, Some(&typography), None),
             WritingMode::VerticalRl
         );
+    }
+
+    #[test]
+    fn thai_is_always_horizontal() {
+        let mut typography = Typography {
+            origin: koharu_scene::Origin::User,
+            preferred_font: None,
+            font_weight: None,
+            font_style: None,
+            size: None,
+            auto_fit: true,
+            color: None,
+            stroke_color: None,
+            stroke_width: None,
+            alignment: None,
+            writing_mode: Some(koharu_scene::WritingMode::Vertical),
+            extensions: BTreeMap::new(),
+        };
+        let tall = LayoutBox {
+            x: 0.0,
+            y: 0.0,
+            width: 60.0,
+            height: 300.0,
+        };
+
+        // A stray kana used to make the text count as Japanese and keep the
+        // source's vertical mode.
+        assert_eq!(
+            resolve_writing_mode("อะไรนะ の", Some("th-TH"), tall, Some(&typography), None),
+            WritingMode::Horizontal
+        );
+        typography.origin = koharu_scene::Origin::Generated(Generation::new(
+            ProducerId::new("dev.koharu.pipeline.detection").unwrap(),
+        ));
+        assert_eq!(
+            resolve_writing_mode("ええ", Some("th"), tall, Some(&typography), None),
+            WritingMode::Horizontal
+        );
+        assert_eq!(
+            resolve_writing_mode("อะไรนะ の", None, tall, Some(&typography), None),
+            WritingMode::Horizontal
+        );
+    }
+
+    #[test]
+    fn stroke_is_capped_at_the_source_pixel_limit() {
+        let mut typography = Typography {
+            origin: koharu_scene::Origin::User,
+            preferred_font: None,
+            font_weight: None,
+            font_style: None,
+            size: None,
+            auto_fit: true,
+            color: None,
+            stroke_color: None,
+            stroke_width: Some(12.0),
+            alignment: None,
+            writing_mode: None,
+            extensions: BTreeMap::new(),
+        };
+
+        assert_eq!(resolve_stroke(Some(&typography)).unwrap().width_px, 5.0);
+        typography.stroke_width = Some(3.0);
+        assert_eq!(resolve_stroke(Some(&typography)).unwrap().width_px, 3.0);
     }
 
     fn png(width: u32, height: u32, color: [u8; 4]) -> Arc<[u8]> {

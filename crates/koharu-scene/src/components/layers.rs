@@ -130,6 +130,12 @@ pub struct Typography {
     pub extensions: BTreeMap<String, String>,
 }
 
+impl Typography {
+    /// Widest outline, in source-image pixels. Outlines are measured from the
+    /// original art, and a wide one swallows the thin strokes of Thai glyphs.
+    pub const MAX_STROKE_WIDTH: f32 = 5.0;
+}
+
 impl Component for Typography {
     const KIND: &'static str = "dev.koharu.text.typography";
 

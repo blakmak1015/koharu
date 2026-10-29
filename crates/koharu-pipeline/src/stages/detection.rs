@@ -413,7 +413,9 @@ fn write_region<'a>(
             stroke_color: inferred
                 .and_then(|value| value.stroke_color)
                 .map(|color| [color[0], color[1], color[2], u8::MAX]),
-            stroke_width: inferred.and_then(|value| value.stroke_width),
+            stroke_width: inferred
+                .and_then(|value| value.stroke_width)
+                .map(|width| width.min(Typography::MAX_STROKE_WIDTH)),
             alignment: None,
             writing_mode: inferred.map(|value| value.writing_mode),
             extensions: Default::default(),

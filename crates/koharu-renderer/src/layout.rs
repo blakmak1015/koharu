@@ -384,80 +384,57 @@ impl<'a> TextLayout<'a> {
                 && layout.height <= max_height + f32::EPSILON
         };
 
-        if self.comic_balloon.is_some() {
-            // A balloon's usable width changes when the text reflows to a different
-            // number of lines, so a smaller font can fail even though a larger one
-            // fits. Search from largest to smallest instead of assuming monotonicity.
-            if self.hyphenation_policy == HyphenationPolicy::LastResort {
-                let mut unhyphenated = self.clone();
-                unhyphenated.hyphenation_policy = HyphenationPolicy::Disabled;
-                let clean = largest_fitting_font_size(
-                    minimum,
-                    maximum,
-                    |size| unhyphenated.run_with_size(text, size),
-                    fits,
-                )?;
-                // Avoiding a word break is no longer useful once it pins the text to
-                // the configured readability floor. Compare raster-size buckets so
-                // hyphenation must recover a visible pixel, not a tuned percentage.
-                if clean
-                    .as_ref()
-                    .is_some_and(|best| best.font_size.floor() > minimum.floor())
-                {
-                    return Ok(clean.unwrap());
-                }
-                let hyphenated = largest_fitting_font_size(
-                    minimum,
-                    maximum,
-                    |size| self.run_with_size(text, size),
-                    fits,
-                )?;
-                match (clean, hyphenated) {
-                    (Some(clean), Some(hyphenated))
-                        if hyphenated.font_size.floor() > clean.font_size.floor() =>
-                    {
-                        return Ok(hyphenated);
-                    }
-                    (Some(clean), _) => return Ok(clean),
-                    (None, Some(hyphenated)) => return Ok(hyphenated),
-                    (None, None) => {}
-                }
-            } else if let Some(best) = largest_fitting_font_size(
+        // A balloon's usable width changes when the text reflows to a different
+        // number of lines, so a smaller font can fail even though a larger one
+        // fits. Free text is not monotonic either: the balanced breaker may accept
+        // a sliver of overflow at a small size (fewer, fuller lines) while a larger
+        // size fits cleanly. Search from largest to smallest everywhere.
+        if self.comic_balloon.is_some() && self.hyphenation_policy == HyphenationPolicy::LastResort
+        {
+            let mut unhyphenated = self.clone();
+            unhyphenated.hyphenation_policy = HyphenationPolicy::Disabled;
+            let clean = largest_fitting_font_size(
+                minimum,
+                maximum,
+                |size| unhyphenated.run_with_size(text, size),
+                fits,
+            )?;
+            // Avoiding a word break is no longer useful once it pins the text to
+            // the configured readability floor. Compare raster-size buckets so
+            // hyphenation must recover a visible pixel, not a tuned percentage.
+            if clean
+                .as_ref()
+                .is_some_and(|best| best.font_size.floor() > minimum.floor())
+            {
+                return Ok(clean.unwrap());
+            }
+            let hyphenated = largest_fitting_font_size(
                 minimum,
                 maximum,
                 |size| self.run_with_size(text, size),
                 fits,
-            )? {
-                return Ok(best);
+            )?;
+            match (clean, hyphenated) {
+                (Some(clean), Some(hyphenated))
+                    if hyphenated.font_size.floor() > clean.font_size.floor() =>
+                {
+                    return Ok(hyphenated);
+                }
+                (Some(clean), _) => return Ok(clean),
+                (None, Some(hyphenated)) => return Ok(hyphenated),
+                (None, None) => return self.run_with_size(text, minimum),
             }
-            return self.run_with_size(text, minimum);
         }
 
-        let maximum_layout = self.run_with_size(text, maximum)?;
-        if fits(&maximum_layout) {
-            return Ok(maximum_layout);
-        }
-
-        let mut best = self.run_with_size(text, minimum)?;
-        if !fits(&best) {
+        if let Some(best) = largest_fitting_font_size(
+            minimum,
+            maximum,
+            |size| self.run_with_size(text, size),
+            fits,
+        )? {
             return Ok(best);
         }
-
-        let mut low = minimum;
-        let mut high = maximum;
-        let mut iterations = 0u32;
-        while high - low > 0.01 && iterations < 16 {
-            iterations += 1;
-            let size = (low + high) * 0.5;
-            let layout = self.run_with_size(text, size)?;
-            if fits(&layout) {
-                best = layout;
-                low = size;
-            } else {
-                high = size;
-            }
-        }
-        Ok(best)
+        self.run_with_size(text, minimum)
     }
 
     fn run_with_size(&self, text: &str, font_size: f32) -> Result<LayoutRun<'a>> {
@@ -1741,8 +1718,12 @@ fn breaks_overflow(segments: &[LineBreakMeasure], breaks: &[usize], widths: &[f3
 }
 
 impl ComicBalloon {
+    // Divergence from upstream, which keeps a full line of ink as air on every
+    // side. Thai ink (stacked vowels and tone marks) is ~1.4 em tall, so that
+    // cost ~3 em on each axis and pinned narrow balloons to the readability
+    // floor. Half a line still clears the outline; the contour keeps the text inside.
     fn air(&self, ink_height: f32) -> f32 {
-        self.minimum_air.max(ink_height)
+        self.minimum_air.max(ink_height * 0.5)
     }
 
     fn inline_extent(&self, writing_mode: WritingMode, air_x: f32, air_y: f32) -> f32 {
@@ -2261,6 +2242,70 @@ mod tests {
 
         assert!((11.99..=12.0).contains(&fitted));
         assert!(calls.get() <= 18);
+        Ok(())
+    }
+
+    fn thai_font() -> Option<Font> {
+        let mut fonts = FontSystem::new();
+        ["Leelawadee UI", "Tahoma", "Noto Sans Thai"]
+            .into_iter()
+            .find_map(|name| fonts.query_family(name).ok())
+    }
+
+    // Measured on farm page agent-6eaf2265 p1 (2026-10-27): 20 px fits this
+    // free-text box, but 10.2 px "overflows" by 2 px on a two-line break, and
+    // the old bisection returned the floor.
+    #[test]
+    fn free_text_auto_size_is_not_pinned_to_a_floor_that_overflows() -> anyhow::Result<()> {
+        let Some(font) = thai_font() else {
+            eprintln!("no Thai system font; skipped");
+            return Ok(());
+        };
+        let layout = TextLayout::new(&font)
+            .with_alignment(TextAlign::Center)
+            .with_line_height(1.2)
+            .with_max_width(72.0)
+            .with_max_height(147.0)
+            .with_max_font_size(24.0)
+            .with_min_font_size(10.2)
+            .run("ตรงนี้ผนังบาง เลยได้ยินแม้แต่เสียงสั่น")?;
+
+        assert!(!layout.overflowed());
+        assert!(layout.font_size >= 18.0, "got {}", layout.font_size);
+        Ok(())
+    }
+
+    // A tall narrow balloon from the same chapter. With a full line of ink as
+    // air on each side Thai topped out at 16 px; half a line clears 18.
+    #[test]
+    fn horizontal_thai_fills_a_tall_narrow_balloon() -> anyhow::Result<()> {
+        let Some(font) = thai_font() else {
+            eprintln!("no Thai system font; skipped");
+            return Ok(());
+        };
+        let (width, height) = (74.0_f32, 154.0_f32);
+        let contour = (0..64)
+            .map(|step| {
+                let angle = step as f32 / 64.0 * std::f32::consts::TAU;
+                (
+                    width * 0.5 * (1.0 + angle.cos()),
+                    height * 0.5 * (1.0 + angle.sin()),
+                )
+            })
+            .collect();
+        let layout = TextLayout::new(&font)
+            .with_alignment(TextAlign::Center)
+            .with_line_height(1.2)
+            .with_max_width(width)
+            .with_max_height(height)
+            .with_comic_balloon(width, height, contour, 4.0)
+            .with_hyphenation_policy(HyphenationPolicy::LastResort)
+            .with_max_font_size(width)
+            .with_min_font_size(10.2)
+            .run("น้องกว่า... ใช่ไหมคะ?")?;
+
+        assert!(!layout.overflowed());
+        assert!(layout.font_size > 18.0, "got {}", layout.font_size);
         Ok(())
     }
 
@@ -2900,12 +2945,12 @@ mod tests {
                 .with_hyphenation_language_tag("en")
                 .with_hyphenation_policy(policy)
                 .with_alignment(TextAlign::Center)
-                .with_max_width(68.0)
+                .with_max_width(60.0)
                 .with_max_height(218.0)
                 .with_comic_balloon(
-                    68.0,
+                    60.0,
                     218.0,
-                    vec![(0.0, 0.0), (68.0, 0.0), (68.0, 218.0), (0.0, 218.0)],
+                    vec![(0.0, 0.0), (60.0, 0.0), (60.0, 218.0), (0.0, 218.0)],
                     4.0,
                 )
                 .run(text)
@@ -3055,11 +3100,11 @@ mod tests {
     }
 
     #[test]
-    fn comic_balloon_air_uses_the_visible_ink_height_and_explicit_floor() {
+    fn comic_balloon_air_is_half_the_visible_ink_height_with_an_explicit_floor() {
         let balloon = comic_balloon(100.0, 100.0, Vec::new(), 4.0);
 
-        assert_approx_eq(balloon.air(12.0), 12.0);
-        assert_approx_eq(balloon.air(24.0), 24.0);
+        assert_approx_eq(balloon.air(12.0), 6.0);
+        assert_approx_eq(balloon.air(24.0), 12.0);
         assert_approx_eq(balloon.air(3.0), 4.0);
     }
 
