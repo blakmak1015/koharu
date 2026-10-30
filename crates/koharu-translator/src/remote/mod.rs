@@ -124,7 +124,8 @@ pub(crate) async fn models(client: &Client, providers: &ProvidersConfig) -> Vec<
 fn append_models(models: &mut Vec<Model>, result: Result<Vec<Model>>) {
     match result {
         Ok(mut provider_models) => models.append(&mut provider_models),
-        Err(error) => tracing::warn!(%error, "failed to list translation models"),
+        // {:#} prints the whole cause chain; plain Display stopped at "request failed".
+        Err(error) => tracing::warn!(error = format!("{error:#}"), "failed to list translation models"),
     }
 }
 
