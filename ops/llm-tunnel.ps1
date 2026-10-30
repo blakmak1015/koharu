@@ -9,7 +9,7 @@
 # PURE ASCII ON PURPOSE (PowerShell 5.1 reads a BOM-less .ps1 as ANSI).
 
 param(
-  [string] $LlmHost = "192.168.0.104",
+  [string] $LlmHost = "192.168.1.64",
   [string] $User    = "blakm",
   [int]    $Local   = 7677,
   [int]    $Remote  = 7676
