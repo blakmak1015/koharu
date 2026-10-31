@@ -297,9 +297,10 @@ impl StageProcessor for Processor {
         let panels = page_panels(&input)?;
         sort_into_reading_order(&mut placed, &panels, page_size.height);
         let layers: Vec<EntityId> = placed.iter().map(|(_, layer, _, _)| *layer).collect();
+        let terms = glossary_terms(self.config.instructions.as_deref());
         let targets: Vec<(EntityId, String)> = placed
             .into_iter()
-            .map(|(entity, _, source, _)| (entity, source))
+            .map(|(entity, _, source, _)| (entity, snap_to_glossary(&source, &terms)))
             .collect();
         let page_image = if Translator::supports_vision(&self.config.model, &self.config.generation)
         {
@@ -381,6 +382,49 @@ impl StageProcessor for Processor {
     }
 }
 
+/// Source terms of the series glossary the agent appends to the instructions,
+/// one `- source → target` line each. Only all-kanji terms of four or more
+/// characters: they are the series title and full names, the words OCR misreads
+/// by a single stroke-heavy kanji (a 2026-10-30 audit saw the logo 桃源暗鬼 read
+/// as 桃源昭鬼 and 桃角桜介 as 権角桜介), and they are long enough that one
+/// differing kanji is far likelier a misread than another word.
+fn glossary_terms(instructions: Option<&str>) -> Vec<Vec<char>> {
+    instructions
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("- ")?.split_once(" → "))
+        .map(|(source, _)| source.trim().chars().collect::<Vec<_>>())
+        .filter(|term| term.len() >= 4 && term.iter().all(|&c| is_kanji(c)))
+        .collect()
+}
+
+fn is_kanji(c: char) -> bool {
+    matches!(c, '\u{4E00}'..='\u{9FFF}' | '\u{3400}'..='\u{4DBF}')
+}
+
+/// Replace every run of the source that differs from a glossary term in exactly
+/// one kanji with the term, so the model reads the name the series uses. The
+/// stored OCR text is left as recognized; only what the model is shown changes.
+fn snap_to_glossary(source: &str, terms: &[Vec<char>]) -> String {
+    let mut chars: Vec<char> = source.chars().collect();
+    for term in terms {
+        let mut start = 0;
+        while start + term.len() <= chars.len() {
+            let window = &chars[start..start + term.len()];
+            let mut differing = window.iter().zip(term).filter(|(a, b)| a != b);
+            if let (Some((&misread, _)), None) = (differing.next(), differing.next())
+                && is_kanji(misread)
+            {
+                chars[start..start + term.len()].copy_from_slice(term);
+                start += term.len();
+            } else {
+                start += 1;
+            }
+        }
+    }
+    chars.into_iter().collect()
+}
+
 /// Collapse a run of ellipsis dots to three.
 ///
 /// Japanese sets several ellipsis characters in a row for pacing and the model
@@ -428,6 +472,23 @@ fn collapse_ellipsis(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn misread_glossary_kanji_are_snapped_back() {
+        let instructions = "Be natural.\n\nTranslation glossary — use these:\n- 桃源暗鬼 → โทเกนอังกิ\n- 桃角桜介 → โมโมคาโดะ โอสุเกะ\n- 桜介 → โอสุเกะ\n- イルマくん → อิรุมะคุง";
+        let terms = glossary_terms(Some(instructions));
+        assert_eq!(terms.len(), 2);
+        assert_eq!(snap_to_glossary("桃源昭鬼", &terms), "桃源暗鬼");
+        assert_eq!(
+            snap_to_glossary("前号まで→権角桜介に", &terms),
+            "前号まで→桃角桜介に"
+        );
+        // Exact, two-kanji-off and kana-off runs stay as read.
+        assert_eq!(snap_to_glossary("■桃源暗鬼■", &terms), "■桃源暗鬼■");
+        assert_eq!(snap_to_glossary("桃山昭鬼", &terms), "桃山昭鬼");
+        assert_eq!(snap_to_glossary("桃源の鬼", &terms), "桃源の鬼");
+        assert!(glossary_terms(None).is_empty());
+    }
 
     /// A tiny deterministic generator, so a failure reproduces.
     struct Lcg(u64);
