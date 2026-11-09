@@ -43,9 +43,11 @@ function Running() {
 # out-of-memory panic killed the agent thread while the process stayed up and
 # /health still answered {ok:true,ready:true}: the farm sat dead for three and
 # a half hours with 59 chapters queued, and the checks above would not have
-# noticed. The agent writes a line every pass - 15s between idle polls, 60s
-# between retries, and one per pipeline step while it works - so a log that has
-# not moved in ten minutes means the loop is gone, not that there is no work.
+# noticed. The agent writes a line on every step while it works, and while the
+# queue is empty it waits for the website's wake and logs each answer of the
+# gateway's long poll - every 4 minutes, at most 5 if the gateway hangs, every
+# 60s if it is down - so a log that has not moved in ten minutes means the
+# loop is gone, not that there is no work. Keep StallMinutes above 5.
 $farmLog      = Join-Path $env:LOCALAPPDATA 'Koharu\logs\koharu.log'
 $StallMinutes = 10
 

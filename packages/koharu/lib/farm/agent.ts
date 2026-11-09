@@ -31,6 +31,7 @@ import {
   type CompletePage,
   type PipelineVersion,
 } from './website'
+import { WAKE_SAFETY_MS, waitForWake } from './wake'
 
 export type AgentStatus =
   | 'stopped'
@@ -65,6 +66,7 @@ export const defaultAgentSettings: AgentSettings = {
   recycleAfterChapters: 0,
 }
 
+// Provider down or a lost claim race; an empty queue waits for a wake instead.
 const IDLE_WAIT_MS = 15_000
 const ERROR_WAIT_MS = 30_000
 const HEARTBEAT_MS = 30_000
@@ -564,14 +566,24 @@ async function uploadMaster(
   }
 }
 
+/** How to idle after a pass that processed nothing; `wakeSince` makes it wakeable. */
+type Idle = { ms: number; wakeSince?: number }
+
 /** One pass. Returns true when a chapter was processed. */
-async function processOneJob(): Promise<boolean> {
-  if (!(await providerReachable())) return false
+async function processOneJob(): Promise<true | Idle> {
+  // Asking the LLM box costs no Worker request, so this keeps the short wait.
+  if (!(await providerReachable())) return { ms: IDLE_WAIT_MS }
   publish({ status: 'polling' })
+  const since = Date.now()
   const claim = await claimJob(log)
   if (!claim.claimed) {
+    if (claim.queueEmpty) {
+      log(`no jobs available (${claim.reason}) - waiting for a wake`)
+      return { ms: WAKE_SAFETY_MS, wakeSince: since }
+    }
+    // A lost race: another agent took the job, there may be more.
     log(`no jobs available (${claim.reason})`)
-    return false
+    return { ms: claim.waitMs || IDLE_WAIT_MS }
   }
   try {
     await processClaim(claim)
@@ -595,14 +607,21 @@ async function processOneJob(): Promise<boolean> {
   }
 }
 
-async function loop(): Promise<void> {
+// Watches its own signal, not the global one: an idle wait can outlast a
+// stop, and a restart in that window must not leave two loops claiming.
+async function loop(signal: AbortSignal): Promise<void> {
   let sinceRecycle = 0
-  while (!stopped()) {
+  while (!signal.aborted) {
     try {
       const processed = await processOneJob()
-      if (!processed) {
+      if (processed !== true) {
         publish({ status: 'cooldown' })
-        await delay(IDLE_WAIT_MS)
+        if (processed.wakeSince === undefined) await delay(processed.ms)
+        else if (
+          (await waitForWake(processed.ms, processed.wakeSince, () => signal.aborted, log)) === 'wake'
+        ) {
+          log('woken: the website queued work')
+        }
         continue
       }
       sinceRecycle += 1
@@ -613,7 +632,7 @@ async function loop(): Promise<void> {
         return
       }
     } catch (error) {
-      if (stopped()) return
+      if (signal.aborted) return
       if (error instanceof PipelineWedged) {
         log('restarting koharu to clear the stuck pipeline')
         stopAgent()
@@ -634,7 +653,10 @@ export function startAgent(next: AgentSettings = defaultAgentSettings): void {
   abort = new AbortController()
   publish({ status: 'polling', lastError: null })
   log('agent started')
-  void loop().finally(() => publish({ status: 'stopped', currentJob: null }))
+  // An old loop finishing its idle wait after a restart must not mark the new one stopped.
+  void loop(abort.signal).finally(() => {
+    if (stopped()) publish({ status: 'stopped', currentJob: null })
+  })
 }
 
 export function stopAgent(): void {

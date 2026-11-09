@@ -281,6 +281,23 @@ pub(crate) async fn farm_put_document(
     Ok(size)
 }
 
+/// Long-poll the local editor gateway's wake route; returns the HTTP status.
+///
+/// Through Rust for the same reason as `farm_put_document`: the gateway is a
+/// different origin and sends no CORS headers. 200 means work was queued, 204
+/// is the gateway's own ~4-minute poll timeout; the deadline here only covers
+/// a gateway that accepts the connection and then never answers.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn farm_wait_wake(url: String) -> std::result::Result<u16, Error> {
+    let response = reqwest::Client::new()
+        .get(url)
+        .timeout(std::time::Duration::from_secs(300))
+        .send()
+        .await?;
+    Ok(response.status().as_u16())
+}
+
 /// Archive the open project and PUT it to a presigned URL.
 ///
 /// The farm lost this in the move to 0.83: nothing saves a `.khrproj` master

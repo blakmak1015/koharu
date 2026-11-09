@@ -25,7 +25,7 @@ export type AgentPage = {
 }
 
 export type ClaimResponse =
-  | { success: true; claimed: false; reason: string; waitMs: number }
+  | { success: true; claimed: false; reason: string; waitMs: number; queueEmpty?: boolean }
   | {
       success: true
       claimed: true

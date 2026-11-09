@@ -148,6 +148,15 @@ export const commands = {
 	 *  the bucket to allow that origin, and the bucket is private on purpose.
 	 */
 	farmPutDocument: (url: string, body: string, contentType: string) => __TAURI_INVOKE<number>("farm_put_document", { url, body, contentType }),
+	/**
+	 *  Long-poll the local editor gateway's wake route; returns the HTTP status.
+	 * 
+	 *  Through Rust for the same reason as `farm_put_document`: the gateway is a
+	 *  different origin and sends no CORS headers. 200 means work was queued, 204
+	 *  is the gateway's own ~4-minute poll timeout; the deadline here only covers
+	 *  a gateway that accepts the connection and then never answers.
+	 */
+	farmWaitWake: (url: string) => __TAURI_INVOKE<number>("farm_wait_wake", { url }),
 	/**  Read this instance's agent credentials. */
 	farmGetAgentCredentials: () => __TAURI_INVOKE<AgentCredentials>("farm_get_agent_credentials"),
 	/**
